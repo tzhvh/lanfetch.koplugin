@@ -58,6 +58,22 @@ _Avoid_: Duplicate manager, conflict resolver
 The modal dialog displaying the final save path and editable filename before starting the network transfer.
 _Avoid_: Download modal, save prompt
 
+**Pre-Flight Metadata Probe**:
+The lightweight header-only network query executed prior to the confirmation dialog to discover redirect locations, RFC 5987 filenames, and content lengths without streaming body data.
+_Avoid_: HEAD check, pre-fetch, preliminary scan
+
+**Resilient Socket Transport**:
+The custom streaming socket layer capable of gracefully handling non-standard HTTP 1.0 redirect headers (such as bogus Content-Length on 302 responses) and auto-encoding raw whitespace in redirect paths.
+_Avoid_: Custom http, raw socket fetcher, socket hack
+
+**Tag Ribbon Paging**:
+The sliding window mechanism presenting navigation arrows (◀ / ▶) across subfolder presets when tag count exceeds the physical display width.
+_Avoid_: Tag scroller, folder carousel, chip paginator
+
+**Modal Window Container**:
+The centered floating frame architecture utilizing `modal = true`, `FrameContainer`, and `MovableContainer` to avoid fullscreen window stack deadlocks on dismissal.
+_Avoid_: Fullscreen canvas, overlay window
+
 **Ephemeral State**:
 In-memory runtime state (such as the active URL, typed octets, and session history) that is cleared upon closing the plugin to avoid flash storage wear.
 _Avoid_: Session cache, temp storage, volatile settings

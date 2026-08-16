@@ -18,6 +18,7 @@ Complete architecture and technical specification for the KOReader LAN PDF Downl
 
 <!-- the index — one line per closed ticket: enough to judge relevance, then zoom the link for the detail the ticket holds -->
 
+- [Specification: LAN PDF Downloader for KOReader](spec.md) — Comprehensive technical specification detailing the complete dual-mode input architecture, zero-packet subnet probe, pre-flight metadata probe, resilient raw socket transport, paged tag ribbon, and native modal dialog container.
 - [Portable Subnet Probe & Android Compatibility](issues/01-portable-subnet-probe.md) — Non-blocking dummy connected UDP socket queries kernel routing table across Android and Linux without root, packets, or shell forks.
 - [Octet Tabber State Machine & E-Ink Selection Control](issues/02-octet-tabber-state-machine.md) — Discrete token state machine enables Tab cycling, digit overwrite on whole selection, arrow deselection, and backspace substring wipe with high-contrast e-ink partial redraws.
 - [Dual-Mode Keyboard Coexistence & Alphanumeric Handoff](issues/03-dual-mode-keyboard-coexistence.md) — Bidirectional URL parser enables seamless handoff between the custom full-screen LAN keypad and KOReader's native InputDialog/virtual keyboard.
