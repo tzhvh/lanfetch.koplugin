@@ -296,13 +296,67 @@ function LanFetchDialog:showAddFolderDialog()
     UIManager:show(dialog)
 end
 
+function LanFetchDialog:showChangeBaseFolderDialog()
+    local ok_pc, PathChooser = pcall(require, "ui/widget/pathchooser")
+    if ok_pc and PathChooser then
+        local chooser
+        chooser = PathChooser:new{
+            title = _("Select Base Download Folder"),
+            select_file = false,
+            show_files = false,
+            path = self.folder_manager.base_dir,
+            onConfirm = function(chosen_path)
+                if chosen_path and chosen_path ~= "" then
+                    self.folder_manager:setBaseDir(chosen_path)
+                    if self.on_save_base_dir then
+                        self.on_save_base_dir(chosen_path)
+                    end
+                    self:refreshUI()
+                end
+            end
+        }
+        UIManager:show(chooser)
+    else
+        local dialog
+        dialog = InputDialog:new{
+            title = _("Configure Base Folder"),
+            input = self.folder_manager.base_dir,
+            description = _("Enter base directory path:"),
+            buttons = {
+                {
+                    { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                    { text = _("Save"), callback = function()
+                        local val = dialog:getInputText()
+                        if val and val:match("%S") then
+                            val = val:gsub("/+$", "")
+                            self.folder_manager:setBaseDir(val)
+                            if self.on_save_base_dir then
+                                self.on_save_base_dir(val)
+                            end
+                            self:refreshUI()
+                        end
+                        UIManager:close(dialog)
+                    end },
+                }
+            }
+        }
+        UIManager:show(dialog)
+    end
+end
+
 function LanFetchDialog:showFolderActionMenu()
     local dialog
     dialog = ConfirmBox:new{
-        text = T(_("Current Target Folder:\n%1\n\nChoose an action:"), self.folder_manager:getTargetPath()),
-        ok_text = _("Open in Files"),
-        cancel_text = _("Close"),
+        text = T(_("Current Save Path:\n%1\n\nBase: %2\nTag: %3"),
+            self.folder_manager:getTargetPath(),
+            self.folder_manager.base_dir,
+            self.folder_manager.active_preset or "[Root]"),
+        ok_text = _("📁 Change Base"),
+        cancel_text = _("📂 Open in Files"),
         ok_callback = function()
+            self:showChangeBaseFolderDialog()
+        end,
+        cancel_callback = function()
             if self.plugin and self.plugin.openTargetFolder then
                 self.plugin:openTargetFolder(self.folder_manager:getTargetPath())
             end

@@ -155,6 +155,10 @@ function LanFetch:showDownloader()
         on_save_presets = function(new_presets)
             self:saveFields({ presets = new_presets })
         end,
+        on_save_base_dir = function(new_base_dir)
+            self.base_dir = new_base_dir
+            self:saveFields({ base_dir = new_base_dir })
+        end,
     }
     UIManager:show(dialog)
 end
