@@ -318,7 +318,7 @@ function LanFetchDialog:buildLayout()
         background = Blitbuffer.COLOR_WHITE,
         radius = Size.radius.window,
         bordersize = Size.border.window,
-        padding = Size.padding.window,
+        padding = Size.padding.default,
         margin = Size.margin.default,
         main_group,
     }
