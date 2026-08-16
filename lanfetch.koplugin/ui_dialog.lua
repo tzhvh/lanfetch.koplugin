@@ -362,27 +362,67 @@ function LanFetchDialog:startDownloadURL(target_url)
     local target_dir = self.folder_manager:getTargetPath()
     self.folder_manager:ensureTargetDirectoryExists()
 
-    local candidate_name = DownloadEngine.extractFilenameFromUrl(target_url) or "download.pdf"
-    candidate_name = DownloadEngine.sanitizeFilename(candidate_name)
+    local initial_candidate = DownloadEngine.extractFilenameFromUrl(target_url)
 
-    local confirm_dialog
-    confirm_dialog = InputDialog:new{
-        title = _("Confirm Download"),
-        input = candidate_name,
-        description = T(_("Saving to:\n%1"), target_dir),
-        buttons = {
-            {
-                { text = _("Cancel"), callback = function() UIManager:close(confirm_dialog) end },
-                { text = _("Download"), callback = function()
-                    local custom_name = confirm_dialog:getInputText()
-                    custom_name = DownloadEngine.sanitizeFilename(custom_name)
-                    UIManager:close(confirm_dialog)
-                    self:executeDownload(target_url, target_dir, custom_name)
-                end },
+    -- If no explicit filename in URL path, probe server redirects and headers
+    if not initial_candidate or initial_candidate == "" then
+        local probe_dialog = ProgressWidget:new{
+            text = _("Querying server for filename..."),
+        }
+        UIManager:show(probe_dialog)
+
+        UIManager:nextTick(function()
+            local probed_name, final_url, expected_size = DownloadEngine.probeRemoteMetadata(target_url, 4)
+            UIManager:close(probe_dialog)
+
+            local candidate_name = probed_name or "download.pdf"
+            candidate_name = DownloadEngine.sanitizeFilename(candidate_name)
+
+            local desc_text = T(_("Saving to:\n%1"), target_dir)
+            if expected_size and expected_size > 0 then
+                desc_text = desc_text .. string.format("\nFile size: %.1f KB", expected_size / 1024)
+            end
+
+            local confirm_dialog
+            confirm_dialog = InputDialog:new{
+                title = _("Confirm Download"),
+                input = candidate_name,
+                description = desc_text,
+                buttons = {
+                    {
+                        { text = _("Cancel"), callback = function() UIManager:close(confirm_dialog) end },
+                        { text = _("Download"), callback = function()
+                            local custom_name = confirm_dialog:getInputText()
+                            custom_name = DownloadEngine.sanitizeFilename(custom_name)
+                            UIManager:close(confirm_dialog)
+                            self:executeDownload(final_url or target_url, target_dir, custom_name)
+                        end },
+                    }
+                }
+            }
+            UIManager:show(confirm_dialog)
+        end)
+    else
+        local candidate_name = DownloadEngine.sanitizeFilename(initial_candidate)
+        local confirm_dialog
+        confirm_dialog = InputDialog:new{
+            title = _("Confirm Download"),
+            input = candidate_name,
+            description = T(_("Saving to:\n%1"), target_dir),
+            buttons = {
+                {
+                    { text = _("Cancel"), callback = function() UIManager:close(confirm_dialog) end },
+                    { text = _("Download"), callback = function()
+                        local custom_name = confirm_dialog:getInputText()
+                        custom_name = DownloadEngine.sanitizeFilename(custom_name)
+                        UIManager:close(confirm_dialog)
+                        self:executeDownload(target_url, target_dir, custom_name)
+                    end },
+                }
             }
         }
-    }
-    UIManager:show(confirm_dialog)
+        UIManager:show(confirm_dialog)
+    end
 end
 
 function LanFetchDialog:executeDownload(url, target_dir, custom_filename)

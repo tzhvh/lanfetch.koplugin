@@ -2,7 +2,7 @@
 DownloadEngine: Resilient HTTP/HTTPS streaming download engine for KOReader.
 Handles non-standard LAN HTTP servers (e.g. ShareViaHttp, Python http.server, Calibre),
 RFC 5987 Content-Disposition parsing, unencoded redirect paths with spaces,
-and atomic direct-to-disk streaming without memory buffering.
+pre-download filename derivation from redirects, and atomic direct-to-disk streaming without memory buffering.
 --]]--
 
 local socket = require("socket")
@@ -127,6 +127,97 @@ function DownloadEngine.getUniqueFilename(target_dir, base_name)
         end
         index = index + 1
     end
+end
+
+--- Lightweight pre-flight probe: Follows redirects to derive filename and file size before download prompt
+function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec)
+    timeout_sec = timeout_sec or 5
+    local current_url = initial_url
+    local redirect_count = 0
+    local visited_urls = {}
+    local last_location_name = nil
+
+    while redirect_count < DownloadEngine.MAX_REDIRECTS do
+        if visited_urls[current_url] then break end
+        visited_urls[current_url] = true
+
+        local parsed = url_util.parse(current_url)
+        if not parsed or not parsed.host then break end
+
+        local scheme = (parsed.scheme or "http"):lower()
+        local host = parsed.host
+        local port = tonumber(parsed.port) or (scheme == "https" and 443 or 80)
+        local path = parsed.path or "/"
+        if parsed.query then path = path .. "?" .. parsed.query end
+        path = path:gsub(" ", "%%20")
+        if not path:match("^/") then path = "/" .. path end
+
+        local tcp = socket.tcp()
+        tcp:settimeout(timeout_sec)
+        local ok, err = tcp:connect(host, port)
+        if not ok then
+            tcp:close()
+            break
+        end
+
+        local client = tcp
+        if scheme == "https" then
+            if not ssl then tcp:close(); break end
+            local ssl_sock = ssl.wrap(tcp, { mode = "client", protocol = "any", verify = "none", options = "all" })
+            if not ssl_sock then tcp:close(); break end
+            if not ssl_sock:dohandshake() then ssl_sock:close(); break end
+            client = ssl_sock
+        end
+
+        client:settimeout(timeout_sec)
+
+        local host_header = (port == 80 or port == 443) and host or string.format("%s:%d", host, port)
+        local req = string.format("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: KOReader/Downloader\r\nAccept: */*\r\nConnection: close\r\n\r\n", path, host_header)
+        client:send(req)
+
+        local status_line = client:receive("*l")
+        if not status_line then
+            client:close()
+            break
+        end
+
+        local http_ver, code_str = status_line:match("^(HTTP/[%d%.]+)%s+(%d+)")
+        local code = tonumber(code_str) or 0
+
+        local headers = {}
+        while true do
+            local line = client:receive("*l")
+            if not line or line == "" then break end
+            local hk, hv = line:match("^([^:]+):%s*(.*)$")
+            if hk then headers[hk:lower()] = hv end
+        end
+        client:close()
+
+        if code >= 300 and code < 400 and headers["location"] then
+            local raw_loc = headers["location"]
+            local loc_filename = raw_loc:match("([^/]+)$")
+            if loc_filename and loc_filename ~= "" then
+                local ok_un, decoded = pcall(url_util.unescape, loc_filename)
+                if ok_un and decoded and decoded ~= "" then
+                    last_location_name = decoded
+                end
+            end
+            local loc_escaped = raw_loc:gsub(" ", "%%20")
+            current_url = url_util.absolute(current_url, loc_escaped)
+            redirect_count = redirect_count + 1
+        elseif code >= 200 and code < 300 then
+            local cd_name = DownloadEngine.parseContentDisposition(headers["content-disposition"])
+            local url_name = DownloadEngine.extractFilenameFromUrl(current_url)
+            local final_name = cd_name or url_name or last_location_name
+            local size = tonumber(headers["content-length"])
+            return final_name, current_url, size, headers
+        else
+            break
+        end
+    end
+
+    local fallback_url_name = DownloadEngine.extractFilenameFromUrl(current_url)
+    return fallback_url_name or last_location_name, current_url, nil, nil
 end
 
 --- Resilient Socket Transport: Handles HTTP/HTTPS, redirects with raw spaces & broken 302 Content-Lengths
