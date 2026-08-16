@@ -248,7 +248,7 @@ function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec)
 end
 
 --- Resilient Socket Transport: Handles HTTP/HTTPS, redirects with raw spaces & broken 302 Content-Lengths
-function DownloadEngine.download(initial_url, target_directory, options, progress_callback, abort_checker)
+function DownloadEngine.download(initial_url, target_directory, options, progress_callback, abort_checker, yield_callback)
     options = options or {}
     local current_url = initial_url
     local redirect_count = 0
@@ -434,6 +434,9 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                                         os.remove(part_path)
                                         error("aborted")
                                     end
+                                end
+                                if yield_callback then
+                                    yield_callback()
                                 end
                             end
 
