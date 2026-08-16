@@ -13,6 +13,8 @@ local TextWidget = require("ui/widget/textwidget")
 local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Notification = require("ui/widget/notification")
+local ProgressWidget = require("ui/widget/progresswidget")
+local VerticalSpan = require("ui/widget/verticalspan")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
@@ -21,6 +23,7 @@ local MovableContainer = require("ui/widget/container/movablecontainer")
 local Size = require("ui/size")
 local Font = require("ui/font")
 local Blitbuffer = require("ffi/blitbuffer")
+local socket = require("socket")
 local logger = require("logger")
 local _ = require("gettext")
 local T = require("ffi/util").template
@@ -580,14 +583,94 @@ end
 function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
     self.abort_requested = false
 
-    local progress_dialog = InfoMessage:new{
-        text = T(_("Downloading from LAN...\n%1"), custom_filename),
-        dismissable = false,
+    local title_face = Font:getFace("cfont", 18)
+    local stats_face = Font:getFace("cfont", 14)
+
+    local title_widget = TextWidget:new{
+        text = T(_("Downloading: %1"), custom_filename or "document.pdf"),
+        face = title_face,
+        bold = true,
     }
+
+    local progress_bar = ProgressWidget:new{
+        width = Screen:scaleBySize(260),
+        height = Screen:scaleBySize(10),
+        percentage = 0,
+    }
+
+    local stats_widget = TextWidget:new{
+        text = _("Connecting to LAN server..."),
+        face = stats_face,
+    }
+
+    local cancel_button = Button:new{
+        text = _("Cancel Download"),
+        face = title_face,
+        bordersize = 1,
+        padding = 6,
+        margin = 4,
+        background = Blitbuffer.COLOR_WHITE,
+        callback = function()
+            self.abort_requested = true
+            stats_widget:setText(_("Canceling download..."))
+            UIManager:setDirty(self, "ui")
+        end,
+    }
+
+    local progress_group = VerticalGroup:new{
+        align = "center",
+        title_widget,
+        VerticalSpan:new{ width = Screen:scaleBySize(6) },
+        progress_bar,
+        VerticalSpan:new{ width = Screen:scaleBySize(6) },
+        stats_widget,
+        VerticalSpan:new{ width = Screen:scaleBySize(8) },
+        cancel_button,
+    }
+
+    local progress_frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        radius = Size.radius.window,
+        bordersize = Size.border.window,
+        padding = Size.padding.default,
+        margin = Size.margin.default,
+        progress_group,
+    }
+
+    local progress_dialog = InputContainer:new{
+        CenterContainer:new{
+            dimen = Screen:getSize(),
+            MovableContainer:new{
+                progress_frame
+            }
+        }
+    }
+
     UIManager:show(progress_dialog)
 
-    local progress_cb = function(received, total)
+    local last_ui_time = 0
+    local progress_cb = function(received, total, percentage, speed_bps)
         if self.abort_requested then return false end
+        local now = socket.gettime()
+        if now - last_ui_time >= 0.12 or (total > 0 and received >= total) then
+            last_ui_time = now
+            local rec_str = (received >= 1024*1024)
+                and string.format("%.2f MB", received / (1024 * 1024))
+                or string.format("%.1f KB", received / 1024)
+            local speed_str = (speed_bps >= 1024*1024)
+                and string.format("%.2f MB/s", speed_bps / (1024 * 1024))
+                or string.format("%.1f KB/s", speed_bps / 1024)
+
+            if total and total > 0 then
+                local tot_str = string.format("%.2f MB", total / (1024 * 1024))
+                local pct_int = math.min(100, math.floor(percentage))
+                stats_widget:setText(string.format("%s / %s (%d%%) • %s", rec_str, tot_str, pct_int, speed_str))
+                progress_bar.percentage = math.min(1.0, received / total)
+            else
+                stats_widget:setText(string.format("%s • %s", rec_str, speed_str))
+            end
+            UIManager:setDirty(progress_dialog, "ui")
+        end
         return true
     end
 
@@ -631,6 +714,11 @@ function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
                     ok_callback = function()
                         self:executeDownload(url, target_dir, custom_filename)
                     end,
+                })
+            else
+                UIManager:show(Notification:new{
+                    text = _("Download canceled."),
+                    timeout = 2,
                 })
             end
         end

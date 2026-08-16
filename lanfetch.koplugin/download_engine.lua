@@ -8,13 +8,40 @@ pre-download filename derivation from redirects, and atomic direct-to-disk strea
 local socket = require("socket")
 local ssl = pcall(require, "ssl") and require("ssl") or nil
 local url_util = require("socket.url")
-local socketutil = require("socketutil")
-local Trapper = require("ui/trapper")
-local logger = require("logger")
-local lfs = require("libs/libkoreader-lfs")
-local util = require("util")
-local _ = require("gettext")
-local T = require("ffi/util").template
+
+local ok_su, socketutil = pcall(require, "socketutil")
+if not ok_su or not socketutil then
+    socketutil = { set_timeout = function(...) end }
+end
+
+local ok_trap, Trapper = pcall(require, "ui/trapper")
+if not ok_trap or not Trapper then
+    Trapper = { wrap = function(fn) return fn() end }
+end
+
+local ok_log, logger = pcall(require, "logger")
+if not ok_log or not logger then
+    logger = { dbg = function(...) end, warn = function(...) end, error = function(...) end, info = function(...) end }
+end
+
+local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+if not ok_lfs or not lfs then
+    ok_lfs, lfs = pcall(require, "lfs")
+    if not ok_lfs or not lfs then
+        lfs = { attributes = function(p) local f = io.open(p, "r"); if f then f:close(); return { mode = "file" } end; return nil end }
+    end
+end
+
+local ok_gettext, _ = pcall(require, "gettext")
+if not ok_gettext or type(_) ~= "function" then
+    _ = function(msg) return msg end
+end
+
+local ok_util, T_mod = pcall(require, "ffi/util")
+local T = (ok_util and T_mod and T_mod.template) or function(tmpl, ...)
+    local args = { ... }
+    return tmpl:gsub("%%(%d+)", function(n) return tostring(args[tonumber(n)] or "") end)
+end
 
 local DownloadEngine = {
     MAX_REDIRECTS = 10,
@@ -380,6 +407,7 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                         end
 
                         local bytes_received = 0
+                        local download_start_time = socket.gettime()
 
                         -- Stream chunks directly to disk
                         while true do
@@ -396,7 +424,10 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                                 file_handle:write(data)
                                 bytes_received = bytes_received + #data
                                 if progress_callback then
-                                    local cont = progress_callback(bytes_received, total_expected_bytes)
+                                    local elapsed = math.max(0.001, socket.gettime() - download_start_time)
+                                    local speed_bps = bytes_received / elapsed
+                                    local percentage = (total_expected_bytes > 0) and ((bytes_received / total_expected_bytes) * 100) or 0
+                                    local cont = progress_callback(bytes_received, total_expected_bytes, percentage, speed_bps)
                                     if cont == false then
                                         file_handle:close()
                                         client:close()
