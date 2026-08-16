@@ -245,25 +245,18 @@ function LanFetchDialog:buildLayout()
         makeSegmentBox("port", 64),
     }
 
-    local current_path = self.tabber.segments.path or ""
-    local path_label
-    if current_path == "" then
-        path_label = _("✏️ Path / Filename: / (auto-detect or tap to type)")
-    else
-        path_label = T(_("✏️ Path / Filename: /%1"), current_path)
-    end
-
-    local path_row = HorizontalGroup:new{
+    local full_url = self.tabber:getURL()
+    local url_row = HorizontalGroup:new{
         align = "center",
         Button:new{
-            text = path_label,
+            text = T(_("🔗 %1  ✏️"), full_url),
             face = label_face,
             bordersize = 1,
             padding = 6,
             margin = 2,
             background = Blitbuffer.COLOR_WHITE,
             callback = function()
-                self:editPathWithSystemKeyboard()
+                self:switchToAlphanumericMode()
             end,
         }
     }
@@ -321,7 +314,7 @@ function LanFetchDialog:buildLayout()
             VerticalGroup:new{
                 align = "center",
                 ip_row,
-                FrameContainer:new{ margin = 2, bordersize = 0, background = Blitbuffer.COLOR_WHITE, path_row }
+                FrameContainer:new{ margin = 2, bordersize = 0, background = Blitbuffer.COLOR_WHITE, url_row }
             }
         },
         FrameContainer:new{ margin = 2, padding = 4, bordersize = 0, background = Blitbuffer.COLOR_WHITE, nav_bar },
@@ -436,33 +429,6 @@ function LanFetchDialog:showFolderActionMenu()
                 self.plugin:openTargetFolder(self.folder_manager:getTargetPath())
             end
         end,
-    }
-    UIManager:show(dialog)
-end
-
-function LanFetchDialog:editPathWithSystemKeyboard()
-    local current_path = self.tabber.segments.path or ""
-    local dialog
-    dialog = InputDialog:new{
-        title = _("Path / Filename"),
-        input = current_path,
-        description = _("Enter subpath or filename on LAN server (or leave empty for auto-detect):"),
-        buttons = {
-            {
-                { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
-                { text = _("Clear"), callback = function()
-                    self.tabber.segments.path = ""
-                    UIManager:close(dialog)
-                    self:refreshUI()
-                end },
-                { text = _("Set Path"), callback = function()
-                    local raw = dialog:getInputText() or ""
-                    self.tabber.segments.path = raw:gsub("^/+", "")
-                    UIManager:close(dialog)
-                    self:refreshUI()
-                end },
-            }
-        }
     }
     UIManager:show(dialog)
 end
