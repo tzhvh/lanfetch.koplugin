@@ -5,7 +5,7 @@ OctetTabber: Token state machine for segmented IPv4 entry and e-ink rendering.
 local OctetTabber = {}
 OctetTabber.__index = OctetTabber
 
-local SEGMENT_KEYS = { "o1", "o2", "o3", "o4", "port", "path" }
+local SEGMENT_KEYS = { "o1", "o2", "o3", "o4", "port" }
 
 function OctetTabber.new(initial_octets, initial_port, initial_path)
     local self = setmetatable({}, OctetTabber)
