@@ -17,6 +17,8 @@ local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
 local Device = require("device")
+local MovableContainer = require("ui/widget/container/movablecontainer")
+local Size = require("ui/size")
 local Font = require("ui/font")
 local Blitbuffer = require("ffi/blitbuffer")
 local logger = require("logger")
@@ -30,11 +32,10 @@ local DownloadEngine = require("download_engine")
 
 local LanFetchDialog = InputContainer:extend{
     name = "lanfetch_dialog",
-    covers_fullscreen = true,
+    modal = true,
 }
 
 function LanFetchDialog:init()
-    self.dimen = Screen:getSize()
     self.tabber = OctetTabber.new(nil, self.default_port or 9999, "")
     self.abort_requested = false
     self.tag_scroll_offset = 1
@@ -47,14 +48,6 @@ function LanFetchDialog:init()
     self:detectSubnet(false)
 
     self[1] = self:buildLayout()
-end
-
-function LanFetchDialog:paintTo(bb, x, y)
-    self.dimen.x = x
-    self.dimen.y = y
-    -- Erase full screen canvas with solid white to eliminate ghosting
-    bb:paintRect(x, y, self.dimen.w, self.dimen.h, Blitbuffer.COLOR_WHITE)
-    InputContainer.paintTo(self, bb, x, y)
 end
 
 function LanFetchDialog:detectSubnet(notify_on_fail)
@@ -321,9 +314,20 @@ function LanFetchDialog:buildLayout()
         FrameContainer:new{ margin = 4, padding = 2, bordersize = 0, background = Blitbuffer.COLOR_WHITE, keypad },
     }
 
+    local window_frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        radius = Size.radius.window,
+        bordersize = Size.border.window,
+        padding = Size.padding.window,
+        margin = Size.margin.default,
+        main_group,
+    }
+
     return CenterContainer:new{
-        dimen = self.dimen,
-        main_group
+        dimen = Screen:getSize(),
+        MovableContainer:new{
+            window_frame
+        }
     }
 end
 
@@ -332,9 +336,7 @@ function LanFetchDialog:refreshUI()
         self[1]:free()
     end
     self[1] = self:buildLayout()
-    UIManager:setDirty(self, function()
-        return "ui", self.dimen
-    end)
+    UIManager:setDirty(self, "ui")
 end
 
 function LanFetchDialog:showAddFolderDialog()
