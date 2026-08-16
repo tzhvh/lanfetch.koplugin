@@ -13,7 +13,7 @@ local TextWidget = require("ui/widget/textwidget")
 local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Notification = require("ui/widget/notification")
-local ProgressWidget = require("ui/widget/progresswidget")
+local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
 local Device = require("device")
@@ -366,8 +366,9 @@ function LanFetchDialog:startDownloadURL(target_url)
 
     -- If no explicit filename in URL path, probe server redirects and headers
     if not initial_candidate or initial_candidate == "" then
-        local probe_dialog = ProgressWidget:new{
+        local probe_dialog = InfoMessage:new{
             text = _("Querying server for filename..."),
+            dismissable = false,
         }
         UIManager:show(probe_dialog)
 
@@ -428,29 +429,14 @@ end
 function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
     self.abort_requested = false
 
-    local progress_dialog = ProgressWidget:new{
-        text = _("Connecting to LAN server..."),
+    local progress_dialog = InfoMessage:new{
+        text = T(_("Downloading from LAN...\n%1"), custom_filename),
+        dismissable = false,
     }
     UIManager:show(progress_dialog)
 
-    local start_time = UIManager:getElapsedTimeSinceBoot()
-
     local progress_cb = function(received, total)
         if self.abort_requested then return false end
-        local elapsed = math.max(0.1, UIManager:getElapsedTimeSinceBoot() - start_time)
-        local speed_kbs = (received / 1024) / elapsed
-
-        local text
-        if total and total > 0 then
-            local pct = math.floor((received / total) * 100)
-            text = string.format("%s (%.1f MB / %.1f MB) - %d%%\nSpeed: %.1f KB/s",
-                custom_filename, received / (1024 * 1024), total / (1024 * 1024), pct, speed_kbs)
-            progress_dialog:update(received, total, text)
-        else
-            text = string.format("%s (%.1f MB)\nSpeed: %.1f KB/s",
-                custom_filename, received / (1024 * 1024), speed_kbs)
-            progress_dialog:update(received, 0, text)
-        end
         return true
     end
 
