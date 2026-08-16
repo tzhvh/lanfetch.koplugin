@@ -32,7 +32,6 @@ local DownloadEngine = require("download_engine")
 
 local LanFetchDialog = InputContainer:extend{
     name = "lanfetch_dialog",
-    modal = true,
 }
 
 function LanFetchDialog:init()
