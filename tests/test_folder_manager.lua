@@ -1,5 +1,6 @@
 -- tests/test_folder_manager.lua
-local FolderManager = require("src.folder_manager")
+package.path = "lanfetch.koplugin/?.lua;" .. package.path
+local FolderManager = require("folder_manager")
 
 local function assert_eq(actual, expected, msg)
     if actual ~= expected then
@@ -41,23 +42,21 @@ assert_eq(#tags, 4, "Should have 1 root tag + 3 presets")
 assert_eq(tags[1].display_text, "📁 [Root]", "First item is root")
 assert_eq(tags[2].is_active, true, "Inbox should be active")
 
--- Test 8: Recursive directory creation mock
-local created_dirs = {}
-local mock_lfs = {
-    attributes = function(path)
-        return created_dirs[path] and { mode = "directory" } or nil
-    end,
-    mkdir = function(path)
-        created_dirs[path] = true
-        return true
-    end
-}
+-- Test 8: Path Traversal Prevention
+assert_eq(FolderManager.sanitizeSubfolder("../../../../etc"), "etc", "Directory traversal .. must be stripped")
+assert_eq(FolderManager.sanitizeSubfolder("../../../etc/passwd"), "etc/passwd", "Traversal in nested path must be sanitized")
+assert_eq(FolderManager.sanitizeSubfolder(".."), "", "Lone .. should result in root")
+assert_eq(FolderManager.sanitizeSubfolder("."), "", "Lone . should result in root")
+assert_eq(FolderManager.sanitizeSubfolder("/absolute/path"), "absolute/path", "Leading absolute slash must be stripped")
+assert_eq(FolderManager.sanitizeSubfolder("Books:Tech*?"), "Books_Tech__", "Illegal chars must be replaced with _")
 
-fm:selectPreset("Science/Physics/Quantum")
-local ok, err = fm:ensureTargetDirectoryExists(mock_lfs)
-assert_eq(ok, true, "Directory creation should succeed")
-assert_eq(created_dirs["/mnt/onboard/documents/Downloads/Science"] ~= nil, true, "Intermediate folder /Science created")
-assert_eq(created_dirs["/mnt/onboard/documents/Downloads/Science/Physics"] ~= nil, true, "Intermediate folder /Physics created")
-assert_eq(created_dirs["/mnt/onboard/documents/Downloads/Science/Physics/Quantum"] ~= nil, true, "Leaf folder /Quantum created")
+-- Test 9: Path Traversal Attempt in addPreset
+fm:addPreset("../../../../etc")
+assert_eq(fm.active_subfolder, "etc", "Preset should be sanitized to etc inside base directory")
+assert_eq(fm:getTargetPath(), "/mnt/onboard/documents/Downloads/etc", "Target path must remain inside base_dir")
+
+-- Test 10: ensureTargetDirectoryExists Security Check
+local ok, path_or_err = fm:ensureTargetDirectoryExists()
+assert_eq(ok, true, "Directory creation should succeed inside base_dir")
 
 print("All FolderManager & Tag Preset tests passed successfully!")

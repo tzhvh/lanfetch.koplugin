@@ -445,12 +445,16 @@ function LanFetchDialog:showChangeBaseFolderDialog()
 end
 
 function LanFetchDialog:showFolderActionMenu()
+    local active_tag = (self.folder_manager.active_subfolder and self.folder_manager.active_subfolder ~= "")
+        and self.folder_manager.active_subfolder
+        or "[Root]"
+
     local dialog
     dialog = ConfirmBox:new{
         text = T(_("Current Save Path:\n%1\n\nBase: %2\nTag: %3"),
             self.folder_manager:getTargetPath(),
             self.folder_manager.base_dir,
-            self.folder_manager.active_preset or "[Root]"),
+            active_tag),
         ok_text = _("📁 Change Base"),
         cancel_text = _("📂 Open in Files"),
         ok_callback = function()
