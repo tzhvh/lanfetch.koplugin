@@ -50,18 +50,46 @@ function LanFetchDialog:init()
     self[1] = self:buildLayout()
 end
 
-function LanFetchDialog:detectSubnet(notify_on_fail)
-    local ip = SubnetProbe.detectActiveIP()
-    if ip then
+function LanFetchDialog:detectSubnet(manual_tap)
+    if not manual_tap then
+        -- Fast path on launch: instant single lookup, no notifications
+        local ip = SubnetProbe.detectActiveIP()
+        if ip then
+            local prefill, focus = SubnetProbe.computePrefill(ip)
+            self.tabber:setSubnetPrefill(prefill, focus)
+        end
+        return
+    end
+
+    -- Manual tap on "⚡ Detect Subnet": Discover all active candidate IPs and cycle
+    local all_ips = SubnetProbe.detectAllActiveIPs()
+    if #all_ips == 0 then
+        UIManager:show(Notification:new{
+            text = _("Could not detect local subnet. Please enter IP manually."),
+            timeout = 3,
+        })
+        return
+    end
+
+    if #all_ips == 1 then
+        local ip = all_ips[1]
         local prefill, focus = SubnetProbe.computePrefill(ip)
         self.tabber:setSubnetPrefill(prefill, focus)
+        self:refreshUI()
+        UIManager:show(Notification:new{
+            text = T(_("⚡ Detected Subnet: %1"), ip),
+            timeout = 2,
+        })
     else
-        if notify_on_fail then
-            UIManager:show(Notification:new{
-                text = _("Could not detect local subnet. Please enter IP manually."),
-                timeout = 3,
-            })
-        end
+        self.detected_ip_index = ((self.detected_ip_index or 0) % #all_ips) + 1
+        local ip = all_ips[self.detected_ip_index]
+        local prefill, focus = SubnetProbe.computePrefill(ip)
+        self.tabber:setSubnetPrefill(prefill, focus)
+        self:refreshUI()
+        UIManager:show(Notification:new{
+            text = T(_("⚡ Subnet (%1/%2): %3 (tap to cycle)"), self.detected_ip_index, #all_ips, ip),
+            timeout = 3,
+        })
     end
 end
 

@@ -3,39 +3,114 @@ SubnetProbe: Non-blocking UDP routing probe & CIDR netmask calculator for KORead
 --]]--
 
 local socket = require("socket")
-local logger = require("logger")
+local ok_logger, logger = pcall(require, "logger")
+if not ok_logger then
+    logger = { dbg = function(...) end, warn = function(...) end, error = function(...) end }
+end
 
 local SubnetProbe = {}
 
 local PROBE_TARGETS = {
-    { ip = "1.1.1.1", port = 80 },        -- Primary: Fast default route lookup
+    { ip = "1.1.1.1", port = 80 },        -- Primary: Fast default route lookup (Wi-Fi/Internet)
+    { ip = "192.168.1.1", port = 80 },    -- Private LAN Class C (192.168.1.x)
+    { ip = "192.168.0.1", port = 80 },    -- Private LAN Class C (192.168.0.x)
+    { ip = "192.168.2.1", port = 80 },    -- Private LAN Class C (192.168.2.x)
+    { ip = "192.168.3.1", port = 80 },    -- Private LAN Class C (192.168.3.x)
+    { ip = "10.0.0.1", port = 80 },       -- Private LAN Class A (10.0.0.x)
+    { ip = "10.0.1.1", port = 80 },       -- Private LAN Class A (10.0.1.x)
+    { ip = "172.16.0.1", port = 80 },     -- Private LAN Class B (172.16.x.x)
     { ip = "8.8.8.8", port = 53 },        -- Secondary WAN
-    { ip = "192.168.1.1", port = 80 },    -- Private LAN Class C fallback
-    { ip = "192.168.0.1", port = 80 },    -- Private LAN Class C fallback
-    { ip = "10.0.0.1", port = 80 },       -- Private LAN Class A fallback
 }
 
-function SubnetProbe.detectActiveIP()
-    for _, target in ipairs(PROBE_TARGETS) do
-        local ok, ip = pcall(function()
-            local s = socket.udp()
-            if not s then return nil end
-            s:settimeout(0)
-            local res = s:setpeername(target.ip, target.port)
-            if not res then
-                s:close()
-                return nil
-            end
-            local local_ip = s:getsockname()
-            s:close()
-            return local_ip
-        end)
+function SubnetProbe.isPrivateIP(ip)
+    if not ip or type(ip) ~= "string" then return false end
+    local o1, o2 = ip:match("^(%d+)%.(%d+)%.")
+    if not o1 or not o2 then return false end
+    local n1, n2 = tonumber(o1), tonumber(o2)
+    if n1 == 10 then return true end
+    if n1 == 172 and n2 >= 16 and n2 <= 31 then return true end
+    if n1 == 192 and n2 == 168 then return true end
+    return false
+end
 
-        if ok and ip and ip ~= "0.0.0.0" and ip ~= "127.0.0.1" then
-            return ip
+function SubnetProbe.detectAllActiveIPs()
+    local seen = {}
+    local private_ips = {}
+    local other_ips = {}
+
+    local function addIP(ip)
+        if not ip or type(ip) ~= "string" then return end
+        if seen[ip] or ip == "0.0.0.0" or ip == "127.0.0.1" or ip:match("^169%.254") then
+            return
+        end
+        if not ip:match("^%d+%.%d+%.%d+%.%d+$") then
+            return
+        end
+        seen[ip] = true
+        if SubnetProbe.isPrivateIP(ip) then
+            table.insert(private_ips, ip)
+        else
+            table.insert(other_ips, ip)
         end
     end
-    return nil
+
+    for _, target in ipairs(PROBE_TARGETS) do
+        pcall(function()
+            local s = socket.udp()
+            if s then
+                s:settimeout(0)
+                if s:setpeername(target.ip, target.port) then
+                    local local_ip = s:getsockname()
+                    s:close()
+                    addIP(local_ip)
+                else
+                    s:close()
+                end
+            end
+        end)
+    end
+
+    pcall(function()
+        local hostname = socket.dns.gethostname()
+        if hostname then
+            local ip = socket.dns.toip(hostname)
+            addIP(ip)
+        end
+    end)
+
+    local result = {}
+    for _, ip in ipairs(private_ips) do
+        table.insert(result, ip)
+    end
+    for _, ip in ipairs(other_ips) do
+        table.insert(result, ip)
+    end
+
+    return result
+end
+
+function SubnetProbe.detectActiveIP()
+    -- Fast path: probe primary target first
+    local ok, ip = pcall(function()
+        local s = socket.udp()
+        if not s then return nil end
+        s:settimeout(0)
+        local res = s:setpeername("1.1.1.1", 80)
+        if not res then
+            s:close()
+            return nil
+        end
+        local local_ip = s:getsockname()
+        s:close()
+        return local_ip
+    end)
+
+    if ok and ip and SubnetProbe.isPrivateIP(ip) then
+        return ip
+    end
+
+    local all_ips = SubnetProbe.detectAllActiveIPs()
+    return all_ips[1] or nil
 end
 
 function SubnetProbe.getNetmask(ip)

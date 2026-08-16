@@ -1,5 +1,6 @@
 -- tests/test_subnet_probe.lua
-local SubnetProbe = require("src.subnet_probe")
+package.path = "lanfetch.koplugin/?.lua;" .. package.path
+local SubnetProbe = require("subnet_probe")
 
 local function assert_eq(actual, expected, msg)
     if actual ~= expected then
@@ -33,8 +34,21 @@ assert_eq(p3[3], "", "o3 should be empty")
 assert_eq(p3[4], "", "o4 should be empty")
 assert_eq(focus3, 2, "Focus should be on o2")
 
--- Test 4: Dynamic IP Detection probe execution
-local detected_ip = SubnetProbe.detectActiveIP()
-print("Detected active IP on host:", tostring(detected_ip))
+-- Test 4: RFC 1918 Private IP classification
+assert_eq(SubnetProbe.isPrivateIP("192.168.1.100"), true, "192.168.x should be private")
+assert_eq(SubnetProbe.isPrivateIP("10.0.4.50"), true, "10.x should be private")
+assert_eq(SubnetProbe.isPrivateIP("172.20.1.1"), true, "172.20.x should be private")
+assert_eq(SubnetProbe.isPrivateIP("8.8.8.8"), false, "8.8.8.8 is not private")
+assert_eq(SubnetProbe.isPrivateIP("1.1.1.1"), false, "1.1.1.1 is not private")
+assert_eq(SubnetProbe.isPrivateIP("127.0.0.1"), false, "127.0.0.1 is loopback")
 
-print("All SubnetProbe netmask tests passed successfully!")
+-- Test 5: Multi-IP Detection & Fast Path
+local detected_ips = SubnetProbe.detectAllActiveIPs()
+print("Detected active IPs on host:", table.concat(detected_ips, ", "))
+assert_eq(#detected_ips > 0, true, "Should discover at least 1 IP on host")
+
+local fast_ip = SubnetProbe.detectActiveIP()
+print("Fast-path active IP:", tostring(fast_ip))
+assert_eq(fast_ip ~= nil, true, "Fast path should resolve an IP")
+
+print("All SubnetProbe netmask and multi-IP tests passed successfully!")
