@@ -48,6 +48,14 @@ function LanFetchDialog:init()
     self[1] = self:buildLayout()
 end
 
+function LanFetchDialog:paintTo(bb, x, y)
+    self.dimen.x = x
+    self.dimen.y = y
+    -- Erase full screen canvas with solid white to eliminate ghosting
+    bb:paintRect(x, y, self.dimen.w, self.dimen.h, Blitbuffer.COLOR_WHITE)
+    InputContainer.paintTo(self, bb, x, y)
+end
+
 function LanFetchDialog:detectSubnet(notify_on_fail)
     local ip = SubnetProbe.detectActiveIP()
     if ip then
@@ -64,25 +72,60 @@ function LanFetchDialog:detectSubnet(notify_on_fail)
 end
 
 function LanFetchDialog:buildLayout()
-    local title_face = Font:getFace("cfont", 22)
-    local label_face = Font:getFace("cfont", 18)
+    local title_face = Font:getFace("cfont", 20)
+    local label_face = Font:getFace("cfont", 16)
     local octet_face = Font:getFace("cfont", 22)
     local btn_face = Font:getFace("cfont", 18)
 
     local screen_w = Screen:getWidth()
-    local margin_w = math.floor(screen_w * 0.04)
+    local margin_w = math.floor(screen_w * 0.03)
     local content_w = screen_w - (margin_w * 2)
 
-    -- 1. TOP HEADER & TAG BAR
+    -- 1. TOP ACTION BAR
+    local top_action_bar = HorizontalGroup:new{
+        align = "center",
+        Button:new{
+            text = T(_("📁 Save: %1"), self.folder_manager:getTargetPath():match("([^/]+)$") or "Downloads"),
+            face = label_face,
+            padding = 6,
+            margin = 2,
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function() self:showFolderActionMenu() end,
+        },
+        Button:new{
+            text = _("⚡ Detect Subnet"),
+            face = label_face,
+            padding = 6,
+            margin = 2,
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function()
+                self:detectSubnet(true)
+                self:refreshUI()
+            end,
+        },
+        Button:new{
+            text = _("✕ Close"),
+            face = label_face,
+            padding = 6,
+            margin = 2,
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function() self:onClose() end,
+        },
+    }
+
+    -- 2. TAG PRESET RIBBON
     local tag_buttons = {}
     local tag_items = self.folder_manager:getPresetTagItems()
     for _, item in ipairs(tag_items) do
         table.insert(tag_buttons, Button:new{
             text = item.display_text,
-            face = btn_face,
+            face = label_face,
+            bold = item.is_active,
             bordersize = item.is_active and 3 or 1,
             margin = 2,
-            padding = 6,
+            padding = 4,
+            background = item.is_active and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE,
+            text_color = item.is_active and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK,
             callback = function()
                 self.folder_manager:selectPreset(item.subfolder)
                 self:refreshUI()
@@ -91,9 +134,10 @@ function LanFetchDialog:buildLayout()
     end
     table.insert(tag_buttons, Button:new{
         text = _("+ New"),
-        face = btn_face,
+        face = label_face,
         margin = 2,
-        padding = 6,
+        padding = 4,
+        background = Blitbuffer.COLOR_WHITE,
         callback = function() self:showAddFolderDialog() end,
     })
 
@@ -102,45 +146,26 @@ function LanFetchDialog:buildLayout()
         table.unpack(tag_buttons)
     }
 
-    local top_action_bar = HorizontalGroup:new{
-        align = "center",
-        Button:new{
-            text = T(_("📁 Save: %1"), self.folder_manager:getTargetPath()),
-            face = label_face,
-            padding = 6,
-            callback = function() self:showFolderActionMenu() end,
-        },
-        Button:new{
-            text = _("⚡ Detect Subnet"),
-            face = btn_face,
-            padding = 6,
-            callback = function()
-                self:detectSubnet(true)
-                self:refreshUI()
-            end,
-        },
-        Button:new{
-            text = _("✕ Close"),
-            face = btn_face,
-            padding = 6,
-            callback = function() self:onClose() end,
-        },
-    }
-
-    -- 2. URL COMPOSER SEGMENT ROW
-    local function makeSegmentBox(key, label_str)
+    -- 3. SEGMENT BOX BUILDER
+    local function makeSegmentBox(key, min_w)
         local is_active = (self.tabber:getActiveKey() == key)
         local is_selected = is_active and self.tabber.is_selected
         local val = self.tabber.segments[key]
         local display = (val ~= "") and val or "   "
+
+        local bg_color = is_selected and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
+        local fg_color = is_selected and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK
 
         return Button:new{
             text = display,
             face = octet_face,
             bold = is_active,
             bordersize = is_active and 3 or 1,
-            padding = 8,
+            padding = 6,
             margin = 2,
+            min_width = min_w or 48,
+            background = bg_color,
+            text_color = fg_color,
             callback = function()
                 self.tabber:selectSegment(key)
                 self:refreshUI()
@@ -148,33 +173,38 @@ function LanFetchDialog:buildLayout()
         }
     end
 
-    local octet_row = HorizontalGroup:new{
+    -- Split URL composer into 2 clean, spacious rows for zero overflow
+    local ip_row = HorizontalGroup:new{
         align = "center",
-        TextWidget:new{ text = "http://", face = octet_face },
-        makeSegmentBox("o1"),
+        TextWidget:new{ text = "http://", face = label_face },
+        makeSegmentBox("o1", 52),
         TextWidget:new{ text = ".", face = octet_face, bold = true },
-        makeSegmentBox("o2"),
+        makeSegmentBox("o2", 52),
         TextWidget:new{ text = ".", face = octet_face, bold = true },
-        makeSegmentBox("o3"),
+        makeSegmentBox("o3", 52),
         TextWidget:new{ text = ".", face = octet_face, bold = true },
-        makeSegmentBox("o4"),
-        TextWidget:new{ text = ":", face = octet_face, bold = true },
-        makeSegmentBox("port"),
-        TextWidget:new{ text = "/", face = octet_face, bold = true },
-        makeSegmentBox("path"),
+        makeSegmentBox("o4", 52),
+        TextWidget:new{ text = " : ", face = octet_face, bold = true },
+        makeSegmentBox("port", 64),
     }
 
-    -- 3. NAVIGATION BAR
+    local path_row = HorizontalGroup:new{
+        align = "center",
+        TextWidget:new{ text = _("Path / Filename: / "), face = label_face },
+        makeSegmentBox("path", 180),
+    }
+
+    -- 4. NAVIGATION BAR
     local nav_bar = HorizontalGroup:new{
         align = "center",
-        Button:new{ text = _("⇥ Tab Octet"), face = btn_face, padding = 8, margin = 4, callback = function() self.tabber:tab(); self:refreshUI() end },
-        Button:new{ text = _("◀ Left"), face = btn_face, padding = 8, margin = 4, callback = function() self.tabber:arrowLeft(); self:refreshUI() end },
-        Button:new{ text = _("Right ▶"), face = btn_face, padding = 8, margin = 4, callback = function() self.tabber:arrowRight(); self:refreshUI() end },
-        Button:new{ text = _("⌫ Del Box"), face = btn_face, padding = 8, margin = 4, callback = function() self.tabber:backspace(); self:refreshUI() end },
-        Button:new{ text = _("✕ Reset"), face = btn_face, padding = 8, margin = 4, callback = function() self.tabber:clear(); self:refreshUI() end },
+        Button:new{ text = _("⇥ Tab Octet"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:tab(); self:refreshUI() end },
+        Button:new{ text = _("◀ Left"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:arrowLeft(); self:refreshUI() end },
+        Button:new{ text = _("Right ▶"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:arrowRight(); self:refreshUI() end },
+        Button:new{ text = _("⌫ Del Box"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:backspace(); self:refreshUI() end },
+        Button:new{ text = _("✕ Reset"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:clear(); self:refreshUI() end },
     }
 
-    -- 4. CUSTOM E-INK 4x4 KEYPAD
+    -- 5. CUSTOM 4x4 KEYPAD
     local keypad = ButtonTable:new{
         width = content_w,
         buttons = {
@@ -207,11 +237,21 @@ function LanFetchDialog:buildLayout()
 
     local main_group = VerticalGroup:new{
         align = "center",
-        FrameContainer:new{ margin = 4, padding = 4, bordersize = 0, top_action_bar },
-        FrameContainer:new{ margin = 4, padding = 4, bordersize = 1, tag_row },
-        FrameContainer:new{ margin = 8, padding = 12, bordersize = 2, octet_row },
-        FrameContainer:new{ margin = 4, padding = 4, bordersize = 0, nav_bar },
-        FrameContainer:new{ margin = 8, padding = 4, bordersize = 0, keypad },
+        FrameContainer:new{ margin = 2, padding = 4, bordersize = 0, background = Blitbuffer.COLOR_WHITE, top_action_bar },
+        FrameContainer:new{ margin = 2, padding = 4, bordersize = 1, background = Blitbuffer.COLOR_WHITE, tag_row },
+        FrameContainer:new{
+            margin = 4,
+            padding = 6,
+            bordersize = 2,
+            background = Blitbuffer.COLOR_WHITE,
+            VerticalGroup:new{
+                align = "center",
+                ip_row,
+                FrameContainer:new{ margin = 2, bordersize = 0, background = Blitbuffer.COLOR_WHITE, path_row }
+            }
+        },
+        FrameContainer:new{ margin = 2, padding = 4, bordersize = 0, background = Blitbuffer.COLOR_WHITE, nav_bar },
+        FrameContainer:new{ margin = 4, padding = 2, bordersize = 0, background = Blitbuffer.COLOR_WHITE, keypad },
     }
 
     return CenterContainer:new{
@@ -221,6 +261,9 @@ function LanFetchDialog:buildLayout()
 end
 
 function LanFetchDialog:refreshUI()
+    if self[1] and self[1].free then
+        self[1]:free()
+    end
     self[1] = self:buildLayout()
     UIManager:setDirty(self, function()
         return "ui", self.dimen
@@ -319,7 +362,6 @@ function LanFetchDialog:startDownloadURL(target_url)
     local target_dir = self.folder_manager:getTargetPath()
     self.folder_manager:ensureTargetDirectoryExists()
 
-    -- Extract candidate filename
     local candidate_name = DownloadEngine.extractFilenameFromUrl(target_url) or "download.pdf"
     candidate_name = DownloadEngine.sanitizeFilename(candidate_name)
 
@@ -376,7 +418,6 @@ function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
         return self.abort_requested
     end
 
-    -- Run download asynchronously via Trapper
     UIManager:nextTick(function()
         local success, result_or_err, meta = DownloadEngine.download(
             url,
