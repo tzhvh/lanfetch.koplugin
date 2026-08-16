@@ -3,8 +3,8 @@ LanFetchDialog: Fullscreen E-Ink UI with IPv4 Octet Tabber, Tag Switcher, and Cu
 --]]--
 
 local InputContainer = require("ui/widget/container/inputcontainer")
-local VerticalGroup = require("ui/widget/container/verticalgroup")
-local HorizontalGroup = require("ui/widget/container/horizontalgroup")
+local VerticalGroup = require("ui/widget/verticalgroup")
+local HorizontalGroup = require("ui/widget/horizontalgroup")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local ButtonTable = require("ui/widget/buttontable")
@@ -23,10 +23,10 @@ local logger = require("logger")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
-local OctetTabber = require("src/octet_tabber")
-local SubnetProbe = require("src/subnet_probe")
-local URLHandoff = require("src/url_handoff")
-local DownloadEngine = require("src/download_engine")
+local OctetTabber = require("octet_tabber")
+local SubnetProbe = require("subnet_probe")
+local URLHandoff = require("url_handoff")
+local DownloadEngine = require("download_engine")
 
 local LanFetchDialog = InputContainer:extend{
     name = "lanfetch_dialog",

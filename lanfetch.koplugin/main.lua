@@ -16,8 +16,8 @@ local logger = require("logger")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
-local FolderManager = require("src/folder_manager")
-local LanFetchDialog = require("src/ui_dialog")
+local FolderManager = require("folder_manager")
+local LanFetchDialog = require("ui_dialog")
 
 local LanFetch = WidgetContainer:extend{
     name = "lanfetch",
