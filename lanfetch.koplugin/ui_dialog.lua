@@ -37,6 +37,7 @@ function LanFetchDialog:init()
     self.dimen = Screen:getSize()
     self.tabber = OctetTabber.new(nil, self.default_port or 9999, "")
     self.abort_requested = false
+    self.tag_scroll_offset = 1
 
     if Device:hasKeys() then
         self.key_events.Close = { { Device.input.group.Back } }
@@ -113,10 +114,45 @@ function LanFetchDialog:buildLayout()
         },
     }
 
-    -- 2. TAG PRESET RIBBON
-    local tag_buttons = {}
+    -- 2. SCROLLABLE TAG PRESET RIBBON
     local tag_items = self.folder_manager:getPresetTagItems()
-    for _, item in ipairs(tag_items) do
+    local total_tags = #tag_items
+    local max_visible_tags = math.max(3, math.floor(screen_w / 140))
+    local needs_scroll = (total_tags > max_visible_tags)
+
+    if not self.tag_scroll_offset then
+        self.tag_scroll_offset = 1
+    end
+    self.tag_scroll_offset = math.max(1, math.min(self.tag_scroll_offset, total_tags - max_visible_tags + 1))
+
+    local tag_buttons = {}
+
+    -- Left scrolling arrow
+    if needs_scroll then
+        local can_scroll_left = (self.tag_scroll_offset > 1)
+        table.insert(tag_buttons, Button:new{
+            text = " ◀ ",
+            face = label_face,
+            bordersize = 1,
+            enabled = can_scroll_left,
+            margin = 1,
+            padding = 4,
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function()
+                if self.tag_scroll_offset > 1 then
+                    self.tag_scroll_offset = self.tag_scroll_offset - 1
+                    self:refreshUI()
+                end
+            end,
+        })
+    end
+
+    -- Visible slice of tags
+    local start_idx = self.tag_scroll_offset
+    local end_idx = needs_scroll and math.min(total_tags, self.tag_scroll_offset + max_visible_tags - 1) or total_tags
+
+    for i = start_idx, end_idx do
+        local item = tag_items[i]
         local tag_label = (item.is_active and "✓ " or "") .. item.display_text
         table.insert(tag_buttons, Button:new{
             text = tag_label,
@@ -132,6 +168,27 @@ function LanFetchDialog:buildLayout()
             end,
         })
     end
+
+    -- Right scrolling arrow
+    if needs_scroll then
+        local can_scroll_right = (self.tag_scroll_offset + max_visible_tags - 1 < total_tags)
+        table.insert(tag_buttons, Button:new{
+            text = " ▶ ",
+            face = label_face,
+            bordersize = 1,
+            enabled = can_scroll_right,
+            margin = 1,
+            padding = 4,
+            background = Blitbuffer.COLOR_WHITE,
+            callback = function()
+                if self.tag_scroll_offset + max_visible_tags - 1 < total_tags then
+                    self.tag_scroll_offset = self.tag_scroll_offset + 1
+                    self:refreshUI()
+                end
+            end,
+        })
+    end
+
     table.insert(tag_buttons, Button:new{
         text = _("+ New"),
         face = label_face,
@@ -286,6 +343,7 @@ function LanFetchDialog:showAddFolderDialog()
                         if self.on_save_presets then
                             self.on_save_presets(self.folder_manager.presets)
                         end
+                        self.tag_scroll_offset = math.max(1, #self.folder_manager:getPresetTagItems() - 2)
                         self:refreshUI()
                     end
                     UIManager:close(dialog)
