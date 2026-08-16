@@ -117,15 +117,15 @@ function LanFetchDialog:buildLayout()
     local tag_buttons = {}
     local tag_items = self.folder_manager:getPresetTagItems()
     for _, item in ipairs(tag_items) do
+        local tag_label = (item.is_active and "✓ " or "") .. item.display_text
         table.insert(tag_buttons, Button:new{
-            text = item.display_text,
+            text = tag_label,
             face = label_face,
-            bold = item.is_active,
+            text_font_bold = item.is_active,
             bordersize = item.is_active and 3 or 1,
             margin = 2,
             padding = 4,
-            background = item.is_active and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE,
-            text_color = item.is_active and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK,
+            background = Blitbuffer.COLOR_WHITE,
             callback = function()
                 self.folder_manager:selectPreset(item.subfolder)
                 self:refreshUI()
@@ -153,19 +153,19 @@ function LanFetchDialog:buildLayout()
         local val = self.tabber.segments[key]
         local display = (val ~= "") and val or "   "
 
-        local bg_color = is_selected and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
-        local fg_color = is_selected and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK
+        if is_selected then
+            display = "[" .. display .. "]"
+        end
 
         return Button:new{
             text = display,
             face = octet_face,
-            bold = is_active,
+            text_font_bold = is_active,
             bordersize = is_active and 3 or 1,
             padding = 6,
             margin = 2,
-            min_width = min_w or 48,
-            background = bg_color,
-            text_color = fg_color,
+            min_width = min_w or 52,
+            background = Blitbuffer.COLOR_WHITE,
             callback = function()
                 self.tabber:selectSegment(key)
                 self:refreshUI()
