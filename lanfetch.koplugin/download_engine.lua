@@ -37,6 +37,8 @@ if not ok_gettext or type(_) ~= "function" then
     _ = function(msg) return msg end
 end
 
+local ok_dev, Device = pcall(require, "device")
+
 local ok_util, T_mod = pcall(require, "ffi/util")
 local T = (ok_util and T_mod and T_mod.template) or function(tmpl, ...)
     local args = { ... }
@@ -208,13 +210,16 @@ function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec)
             break
         end
 
+        status_line = status_line:gsub("[\r\n]+$", "")
         local http_ver, code_str = status_line:match("^(HTTP/[%d%.]+)%s+(%d+)")
         local code = tonumber(code_str) or 0
 
         local headers = {}
         while true do
             local line = client:receive("*l")
-            if not line or line == "" then break end
+            if not line then break end
+            line = line:gsub("[\r\n]+$", "")
+            if line == "" then break end
             local hk, hv = line:match("^([^:]+):%s*(.*)$")
             if hk then headers[hk:lower()] = hv end
         end
@@ -247,7 +252,7 @@ function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec)
     return fallback_url_name or last_location_name, current_url, nil, nil
 end
 
---- Resilient Socket Transport: Handles HTTP/HTTPS, redirects with raw spaces & broken 302 Content-Lengths
+----- Resilient Socket Transport: Handles HTTP/HTTPS, redirects with raw spaces & broken 302 Content-Lengths
 function DownloadEngine.download(initial_url, target_directory, options, progress_callback, abort_checker, yield_callback)
     options = options or {}
     local current_url = initial_url
@@ -255,267 +260,282 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
     local visited_urls = {}
     local attempted_protocol_fallback = false
 
-    local success = false
-    local result_path_or_err = nil
-    local metadata = {}
+    socketutil:set_timeout(DownloadEngine.CONNECT_TIMEOUT, DownloadEngine.READ_TIMEOUT)
 
-    Trapper:wrap(function()
-        socketutil:set_timeout(DownloadEngine.CONNECT_TIMEOUT, DownloadEngine.READ_TIMEOUT)
+    while true do
+        if abort_checker and abort_checker() then
+            socketutil:reset_timeout()
+            return false, "aborted", {}
+        end
 
-        local ok, run_err = pcall(function()
-            while true do
-                if abort_checker and abort_checker() then
-                    error("aborted")
-                end
+        if redirect_count > DownloadEngine.MAX_REDIRECTS then
+            socketutil:reset_timeout()
+            return false, _("Too many redirects (max 10)"), {}
+        end
 
-                if redirect_count > DownloadEngine.MAX_REDIRECTS then
-                    error(_("Too many redirects (max 10)"))
-                end
+        if visited_urls[current_url] then
+            socketutil:reset_timeout()
+            return false, _("Circular redirect loop detected: ") .. current_url, {}
+        end
+        visited_urls[current_url] = true
 
-                if visited_urls[current_url] then
-                    error(_("Circular redirect loop detected: ") .. current_url)
-                end
-                visited_urls[current_url] = true
+        -- Parse current URL
+        local parsed = url_util.parse(current_url)
+        if not parsed or not parsed.host then
+            socketutil:reset_timeout()
+            return false, _("Invalid URL: ") .. tostring(current_url), {}
+        end
 
-                -- Parse current URL
-                local parsed = url_util.parse(current_url)
-                if not parsed or not parsed.host then
-                    error(_("Invalid URL: ") .. tostring(current_url))
-                end
+        local scheme = (parsed.scheme or "http"):lower()
+        local host = parsed.host
+        local port = tonumber(parsed.port) or (scheme == "https" and 443 or 80)
+        local path = parsed.path or "/"
+        if parsed.query then
+            path = path .. "?" .. parsed.query
+        end
 
-                local scheme = (parsed.scheme or "http"):lower()
-                local host = parsed.host
-                local port = tonumber(parsed.port) or (scheme == "https" and 443 or 80)
-                local path = parsed.path or "/"
-                if parsed.query then
-                    path = path .. "?" .. parsed.query
-                end
+        -- Auto-escape raw spaces and special characters in path
+        path = path:gsub(" ", "%%20")
+        if not path:match("^/") then
+            path = "/" .. path
+        end
 
-                -- Auto-escape raw spaces and special characters in path
-                path = path:gsub(" ", "%%20")
-                if not path:match("^/") then
-                    path = "/" .. path
-                end
+        -- Establish TCP connection
+        local tcp = socket.tcp()
+        tcp:settimeout(DownloadEngine.CONNECT_TIMEOUT)
+        local conn_ok, conn_err = tcp:connect(host, port)
 
-                -- Establish TCP connection
-                local tcp = socket.tcp()
-                tcp:settimeout(DownloadEngine.CONNECT_TIMEOUT)
-                local conn_ok, conn_err = tcp:connect(host, port)
-
-                if not conn_ok then
+        if not conn_ok then
+            tcp:close()
+            -- Transparent HTTP -> HTTPS fallback
+            if not attempted_protocol_fallback and scheme == "http" then
+                attempted_protocol_fallback = true
+                current_url = current_url:gsub("^http://", "https://")
+                logger.warn("DownloadEngine: HTTP connect failed. Retrying HTTPS: " .. current_url)
+                visited_urls = {}
+                -- Loop to retry with HTTPS
+            else
+                socketutil:reset_timeout()
+                return false, T(_("Connection failed to %1:%2 (%3)"), host, port, tostring(conn_err)), {}
+            end
+        else
+            local client = tcp
+            -- Wrap TLS if HTTPS
+            if scheme == "https" then
+                if not ssl then
                     tcp:close()
-                    -- Transparent HTTP -> HTTPS fallback
-                    if not attempted_protocol_fallback and scheme == "http" then
-                        attempted_protocol_fallback = true
-                        current_url = current_url:gsub("^http://", "https://")
-                        logger.warn("DownloadEngine: HTTP connect failed. Retrying HTTPS: " .. current_url)
-                        visited_urls = {}
-                        -- Loop to retry with HTTPS
-                    else
-                        error(T(_("Connection failed to %1:%2 (%3)"), host, port, tostring(conn_err)))
-                    end
-                else
-                    local client = tcp
-                    -- Wrap TLS if HTTPS
-                    if scheme == "https" then
-                        if not ssl then
-                            tcp:close()
-                            error(_("HTTPS requested but LuaSec SSL library is unavailable"))
-                        end
-                        local ssl_params = {
-                            mode = "client",
-                            protocol = "any",
-                            verify = "none",
-                            options = "all",
-                        }
-                        local ssl_sock, ssl_err = ssl.wrap(tcp, ssl_params)
-                        if not ssl_sock then
-                            tcp:close()
-                            error(_("SSL wrap failed: ") .. tostring(ssl_err))
-                        end
-                        local handshake_ok, handshake_err = ssl_sock:dohandshake()
-                        if not handshake_ok then
-                            ssl_sock:close()
-                            error(_("SSL handshake failed: ") .. tostring(handshake_err))
-                        end
-                        client = ssl_sock
-                    end
+                    socketutil:reset_timeout()
+                    return false, _("HTTPS requested but LuaSec SSL library is unavailable"), {}
+                end
+                local ssl_params = {
+                    mode = "client",
+                    protocol = "any",
+                    verify = "none",
+                    options = "all",
+                }
+                local ssl_sock, ssl_err = ssl.wrap(tcp, ssl_params)
+                if not ssl_sock then
+                    tcp:close()
+                    socketutil:reset_timeout()
+                    return false, _("SSL wrap failed: ") .. tostring(ssl_err), {}
+                end
+                local handshake_ok, handshake_err = ssl_sock:dohandshake()
+                if not handshake_ok then
+                    ssl_sock:close()
+                    socketutil:reset_timeout()
+                    return false, _("SSL handshake failed: ") .. tostring(handshake_err), {}
+                end
+                client = ssl_sock
+            end
 
-                    client:settimeout(DownloadEngine.READ_TIMEOUT)
+            client:settimeout(DownloadEngine.READ_TIMEOUT)
 
-                    -- Send HTTP Request
-                    local host_header = (port == 80 or port == 443) and host or string.format("%s:%d", host, port)
-                    local req = string.format(
-                        "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: KOReader/Downloader\r\nAccept: application/pdf,application/octet-stream,*/*\r\nConnection: close\r\n\r\n",
-                        path, host_header
-                    )
-                    client:send(req)
+            -- Send HTTP GET Request
+            local host_header = host
+            if (scheme == "http" and port ~= 80) or (scheme == "https" and port ~= 443) then
+                host_header = host .. ":" .. port
+            end
 
-                    -- Read HTTP Status Line
-                    local status_line, read_err = client:receive("*l")
-                    if not status_line then
-                        client:close()
-                        error(T(_("Server closed connection without response (%1)"), tostring(read_err)))
-                    end
+            local model_name = "KOReader"
+            if ok_dev and Device and Device.getModel then
+                pcall(function() model_name = Device:getModel() end)
+            end
 
-                    local http_ver, code_str, status_msg = status_line:match("^(HTTP/[%d%.]+)%s+(%d+)%s*(.*)$")
-                    local code = tonumber(code_str) or 0
+            local request_str = string.format(
+                "GET %s HTTP/1.1\r\n" ..
+                "Host: %s\r\n" ..
+                "User-Agent: KOReader lanfetch/%s (%s)\r\n" ..
+                "Accept: */*\r\n" ..
+                "Connection: close\r\n\r\n",
+                path,
+                host_header,
+                "1.0",
+                tostring(model_name)
+            )
 
-                    -- Read Response Headers
-                    local headers = {}
-                    while true do
-                        local header_line, h_err = client:receive("*l")
-                        if not header_line or header_line == "" then break end
-                        local hk, hv = header_line:match("^([^:]+):%s*(.*)$")
-                        if hk then
-                            headers[hk:lower()] = hv
-                        end
-                    end
+            local send_ok, send_err = client:send(request_str)
+            if not send_ok then
+                client:close()
+                socketutil:reset_timeout()
+                return false, _("Failed to send request: ") .. tostring(send_err), {}
+            end
 
-                    logger.dbg(string.format("DownloadEngine: Response %d for %s", code, current_url))
+            -- Read HTTP Status Line
+            local status_line, status_err = client:receive("*l")
+            if not status_line then
+                client:close()
+                socketutil:reset_timeout()
+                return false, _("Server closed connection without response: ") .. tostring(status_err), {}
+            end
 
-                    -- Step A: Handle 30x Redirects (301, 302, 303, 307, 308)
-                    if code >= 300 and code < 400 then
-                        -- Critical fix: Close socket IMMEDIATELY without reading body
-                        -- (Ignores buggy Content-Length headers on redirects from ShareViaHttp / Android servers)
-                        client:close()
+            status_line = status_line:gsub("[\r\n]+$", "")
+            local http_ver, status_code_str, status_msg = status_line:match("^(HTTP/[%d%.]+)%s+(%d+)%s*(.*)$")
+            local code = tonumber(status_code_str)
+            if not code then
+                client:close()
+                socketutil:reset_timeout()
+                return false, _("Malformed HTTP status line: ") .. tostring(status_line), {}
+            end
 
-                        local location = headers["location"]
-                        if not location or location == "" then
-                            error(T(_("HTTP %1 redirect missing Location header"), code))
-                        end
-
-                        -- URL-encode unescaped spaces in redirect Location
-                        location = location:gsub(" ", "%%20")
-                        local target_url = url_util.absolute(current_url, location)
-                        logger.dbg("DownloadEngine: Following redirect -> " .. target_url)
-
-                        current_url = target_url
-                        redirect_count = redirect_count + 1
-
-                    -- Step B: Handle 200 OK / 206 Partial Content
-                    elseif code >= 200 and code < 300 then
-                        local total_expected_bytes = tonumber(headers["content-length"]) or 0
-
-                        -- Open temporary destination file
-                        local tmp_filename = string.format(".lanfetch_%d_%d.tmp", os.time(), math.random(1000, 9999))
-                        local part_path = target_directory .. "/" .. tmp_filename
-                        local file_handle, io_err = io.open(part_path, "wb")
-                        if not file_handle then
-                            client:close()
-                            error(_("Cannot create file in destination: ") .. tostring(io_err))
-                        end
-
-                        local bytes_received = 0
-                        local download_start_time = socket.gettime()
-
-                        -- Stream chunks directly to disk
-                        while true do
-                            if abort_checker and abort_checker() then
-                                file_handle:close()
-                                client:close()
-                                os.remove(part_path)
-                                error("aborted")
-                            end
-
-                            local chunk, stream_err, partial = client:receive(8192)
-                            local data = chunk or partial
-                            if data and #data > 0 then
-                                file_handle:write(data)
-                                bytes_received = bytes_received + #data
-                                if progress_callback then
-                                    local elapsed = math.max(0.001, socket.gettime() - download_start_time)
-                                    local speed_bps = bytes_received / elapsed
-                                    local percentage = (total_expected_bytes > 0) and ((bytes_received / total_expected_bytes) * 100) or 0
-                                    local cont = progress_callback(bytes_received, total_expected_bytes, percentage, speed_bps)
-                                    if cont == false then
-                                        file_handle:close()
-                                        client:close()
-                                        os.remove(part_path)
-                                        error("aborted")
-                                    end
-                                end
-                                if yield_callback then
-                                    yield_callback()
-                                end
-                            end
-
-                            if stream_err == "closed" then
-                                break
-                            elseif stream_err then
-                                file_handle:close()
-                                client:close()
-                                os.remove(part_path)
-                                error(T(_("Download interrupted (%1)"), tostring(stream_err)))
-                            end
-                        end
-
-                        file_handle:close()
-                        client:close()
-
-                        if bytes_received == 0 then
-                            os.remove(part_path)
-                            error(_("Downloaded file is empty (0 bytes)"))
-                        end
-
-                        -- Resolve and sanitize final filename
-                        local raw_filename = options.custom_filename
-                        if not raw_filename or raw_filename == "" then
-                            raw_filename = DownloadEngine.parseContentDisposition(headers["content-disposition"])
-                        end
-                        if not raw_filename or raw_filename == "" then
-                            raw_filename = DownloadEngine.extractFilenameFromUrl(current_url)
-                        end
-
-                        local sanitized_name = DownloadEngine.sanitizeFilename(raw_filename)
-                        local final_path = target_directory .. "/" .. sanitized_name
-
-                        if not options.overwrite and lfs.attributes(final_path) then
-                            sanitized_name = DownloadEngine.getUniqueFilename(target_directory, sanitized_name)
-                            final_path = target_directory .. "/" .. sanitized_name
-                        end
-
-                        local rename_ok, rename_err = os.rename(part_path, final_path)
-                        if not rename_ok then
-                            os.remove(part_path)
-                            error(_("Failed to finalize file: ") .. tostring(rename_err))
-                        end
-
-                        success = true
-                        result_path_or_err = final_path
-                        metadata = {
-                            url = current_url,
-                            size = bytes_received,
-                            filename = sanitized_name,
-                            content_type = headers["content-type"],
-                        }
-                        return
-
-                    -- Step C: Handle HTTP 400 fallback or errors
-                    elseif code == 400 and not attempted_protocol_fallback and scheme == "http" then
-                        client:close()
-                        attempted_protocol_fallback = true
-                        current_url = current_url:gsub("^http://", "https://")
-                        logger.warn("DownloadEngine: HTTP 400. Retrying HTTPS: " .. current_url)
-                        visited_urls = {}
-
-                    else
-                        client:close()
-                        error(T(_("Server returned HTTP %1 (%2)"), code, tostring(status_msg or "")))
-                    end
+            -- Read HTTP Response Headers
+            local headers = {}
+            while true do
+                local header_line, h_err = client:receive("*l")
+                if not header_line then break end
+                header_line = header_line:gsub("[\r\n]+$", "")
+                if header_line == "" then break end
+                local k, v = header_line:match("^([^:]+):%s*(.*)$")
+                if k and v then
+                    headers[k:lower()] = v:gsub("%s+$", "")
                 end
             end
-        end)
 
-        socketutil:reset_timeout()
+            logger.dbg(string.format("DownloadEngine: Response %d for %s", code, current_url))
 
-        if not ok then
-            success = false
-            result_path_or_err = tostring(run_err)
+            -- Step A: Handle 30x Redirects (close immediately, ignore Content-Length on 30x)
+            if code >= 300 and code < 400 and headers["location"] then
+                client:close()
+                local raw_loc = headers["location"]
+                local loc_escaped = raw_loc:gsub(" ", "%%20")
+                current_url = url_util.absolute(current_url, loc_escaped)
+                redirect_count = redirect_count + 1
+
+            -- Step B: Handle 200 OK Body Streaming
+            elseif code >= 200 and code < 300 then
+                local total_expected_bytes = tonumber(headers["content-length"]) or 0
+
+                -- Open temporary destination file
+                local tmp_filename = string.format(".lanfetch_%d_%d.tmp", os.time(), math.random(1000, 9999))
+                local part_path = target_directory .. "/" .. tmp_filename
+                local file_handle, io_err = io.open(part_path, "wb")
+                if not file_handle then
+                    client:close()
+                    socketutil:reset_timeout()
+                    return false, _("Cannot create file in destination: ") .. tostring(io_err), {}
+                end
+
+                local bytes_received = 0
+                local download_start_time = socket.gettime()
+
+                -- Stream chunks directly to disk
+                while true do
+                    if abort_checker and abort_checker() then
+                        file_handle:close()
+                        client:close()
+                        os.remove(part_path)
+                        socketutil:reset_timeout()
+                        return false, "aborted", {}
+                    end
+
+                    local chunk, stream_err, partial = client:receive(8192)
+                    local data = chunk or partial
+                    if data and #data > 0 then
+                        file_handle:write(data)
+                        bytes_received = bytes_received + #data
+                        if progress_callback then
+                            local elapsed = math.max(0.001, socket.gettime() - download_start_time)
+                            local speed_bps = bytes_received / elapsed
+                            local percentage = (total_expected_bytes > 0) and ((bytes_received / total_expected_bytes) * 100) or 0
+                            local cont = progress_callback(bytes_received, total_expected_bytes, percentage, speed_bps)
+                            if cont == false then
+                                file_handle:close()
+                                client:close()
+                                os.remove(part_path)
+                                socketutil:reset_timeout()
+                                return false, "aborted", {}
+                            end
+                        end
+                        if yield_callback then
+                            yield_callback()
+                        end
+                    end
+
+                    if stream_err == "closed" then
+                        break
+                    elseif stream_err then
+                        file_handle:close()
+                        client:close()
+                        os.remove(part_path)
+                        socketutil:reset_timeout()
+                        return false, T(_("Download interrupted (%1)"), tostring(stream_err)), {}
+                    end
+                end
+
+                file_handle:close()
+                client:close()
+                socketutil:reset_timeout()
+
+                if bytes_received == 0 then
+                    os.remove(part_path)
+                    return false, _("Downloaded file is empty (0 bytes)"), {}
+                end
+
+                -- Resolve and sanitize final filename
+                local raw_filename = options.custom_filename
+                if not raw_filename or raw_filename == "" then
+                    raw_filename = DownloadEngine.parseContentDisposition(headers["content-disposition"])
+                end
+                if not raw_filename or raw_filename == "" then
+                    raw_filename = DownloadEngine.extractFilenameFromUrl(current_url)
+                end
+
+                local sanitized_name = DownloadEngine.sanitizeFilename(raw_filename)
+                local final_path = target_directory .. "/" .. sanitized_name
+
+                if not options.overwrite and lfs.attributes(final_path) then
+                    sanitized_name = DownloadEngine.getUniqueFilename(target_directory, sanitized_name)
+                    final_path = target_directory .. "/" .. sanitized_name
+                end
+
+                local rename_ok, rename_err = os.rename(part_path, final_path)
+                if not rename_ok then
+                    os.remove(part_path)
+                    return false, _("Failed to finalize file: ") .. tostring(rename_err), {}
+                end
+
+                local metadata = {
+                    url = current_url,
+                    size = bytes_received,
+                    filename = sanitized_name,
+                    content_type = headers["content-type"],
+                }
+                return true, final_path, metadata
+
+            -- Step C: Handle HTTP 400 fallback or errors
+            elseif code == 400 and not attempted_protocol_fallback and scheme == "http" then
+                client:close()
+                attempted_protocol_fallback = true
+                current_url = current_url:gsub("^http://", "https://")
+                logger.warn("DownloadEngine: HTTP 400. Retrying HTTPS: " .. current_url)
+                visited_urls = {}
+
+            else
+                client:close()
+                socketutil:reset_timeout()
+                return false, T(_("Server returned HTTP %1 (%2)"), code, tostring(status_msg or "")), {}
+            end
         end
-    end)
-
-    return success, result_path_or_err, metadata
+    end
 end
 
 return DownloadEngine
