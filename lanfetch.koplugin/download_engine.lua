@@ -9,16 +9,6 @@ local socket = require("socket")
 local ssl = pcall(require, "ssl") and require("ssl") or nil
 local url_util = require("socket.url")
 
-local ok_su, socketutil = pcall(require, "socketutil")
-if not ok_su or not socketutil then
-    socketutil = { set_timeout = function(...) end }
-end
-
-local ok_trap, Trapper = pcall(require, "ui/trapper")
-if not ok_trap or not Trapper then
-    Trapper = { wrap = function(fn) return fn() end }
-end
-
 local ok_log, logger = pcall(require, "logger")
 if not ok_log or not logger then
     logger = { dbg = function(...) end, warn = function(...) end, error = function(...) end, info = function(...) end }
@@ -49,6 +39,18 @@ local DownloadEngine = {
     MAX_REDIRECTS = 10,
     CONNECT_TIMEOUT = 10,
     READ_TIMEOUT = 30,
+}
+
+--- Terminal outcome kinds. Every download() exit returns a uniform table:
+---   { kind = KIND.COMPLETED, path = <final path>,  meta = {url,size,filename,content_type}, error = nil }
+---   { kind = KIND.ABORTED,   path = nil,           meta = {},                                      error = nil }
+---   { kind = KIND.FAILED,    path = nil,           meta = {},                                      error = <message> }
+--- meta is always a table and error is nil exactly when kind ~= FAILED, so callers
+--- never test for field presence.
+DownloadEngine.KIND = {
+    COMPLETED = "completed",
+    ABORTED = "aborted",
+    FAILED = "failed",
 }
 
 --- Parse Content-Disposition header conforming to RFC 6266 & RFC 5987
@@ -254,36 +256,47 @@ end
 
 ----- Resilient Socket Transport: Handles HTTP/HTTPS, redirects with raw spaces & broken 302 Content-Lengths
 function DownloadEngine.download(initial_url, target_directory, options, progress_callback, abort_checker, yield_callback)
+    local KIND = DownloadEngine.KIND
     options = options or {}
     local current_url = initial_url
     local redirect_count = 0
     local visited_urls = {}
     local attempted_protocol_fallback = false
 
-    socketutil:set_timeout(DownloadEngine.CONNECT_TIMEOUT, DownloadEngine.READ_TIMEOUT)
+    -- Terminal funnel: the single exit path from this function. Closes the live
+    -- socket and removes the partial temp file unless the download completed.
+    local open_client = nil
+    local part_path = nil
+    local function finish(outcome_kind, path, meta, error_msg)
+        if open_client then
+            open_client:close()
+            open_client = nil
+        end
+        if part_path and outcome_kind ~= KIND.COMPLETED then
+            os.remove(part_path)
+            part_path = nil
+        end
+        return { kind = outcome_kind, path = path, meta = meta or {}, error = error_msg }
+    end
 
     while true do
         if abort_checker and abort_checker() then
-            socketutil:reset_timeout()
-            return false, "aborted", {}
+            return finish(KIND.ABORTED)
         end
 
         if redirect_count > DownloadEngine.MAX_REDIRECTS then
-            socketutil:reset_timeout()
-            return false, _("Too many redirects (max 10)"), {}
+            return finish(KIND.FAILED, nil, nil, _("Too many redirects (max 10)"))
         end
 
         if visited_urls[current_url] then
-            socketutil:reset_timeout()
-            return false, _("Circular redirect loop detected: ") .. current_url, {}
+            return finish(KIND.FAILED, nil, nil, _("Circular redirect loop detected: ") .. current_url)
         end
         visited_urls[current_url] = true
 
         -- Parse current URL
         local parsed = url_util.parse(current_url)
         if not parsed or not parsed.host then
-            socketutil:reset_timeout()
-            return false, _("Invalid URL: ") .. tostring(current_url), {}
+            return finish(KIND.FAILED, nil, nil, _("Invalid URL: ") .. tostring(current_url))
         end
 
         local scheme = (parsed.scheme or "http"):lower()
@@ -303,10 +316,12 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
         -- Establish TCP connection
         local tcp = socket.tcp()
         tcp:settimeout(DownloadEngine.CONNECT_TIMEOUT)
+        open_client = tcp
         local conn_ok, conn_err = tcp:connect(host, port)
 
         if not conn_ok then
             tcp:close()
+            open_client = nil
             -- Transparent HTTP -> HTTPS fallback
             if not attempted_protocol_fallback and scheme == "http" then
                 attempted_protocol_fallback = true
@@ -315,17 +330,14 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                 visited_urls = {}
                 -- Loop to retry with HTTPS
             else
-                socketutil:reset_timeout()
-                return false, T(_("Connection failed to %1:%2 (%3)"), host, port, tostring(conn_err)), {}
+                return finish(KIND.FAILED, nil, nil, T(_("Connection failed to %1:%2 (%3)"), host, port, tostring(conn_err)))
             end
         else
             local client = tcp
             -- Wrap TLS if HTTPS
             if scheme == "https" then
                 if not ssl then
-                    tcp:close()
-                    socketutil:reset_timeout()
-                    return false, _("HTTPS requested but LuaSec SSL library is unavailable"), {}
+                    return finish(KIND.FAILED, nil, nil, _("HTTPS requested but LuaSec SSL library is unavailable"))
                 end
                 local ssl_params = {
                     mode = "client",
@@ -335,17 +347,15 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                 }
                 local ssl_sock, ssl_err = ssl.wrap(tcp, ssl_params)
                 if not ssl_sock then
-                    tcp:close()
-                    socketutil:reset_timeout()
-                    return false, _("SSL wrap failed: ") .. tostring(ssl_err), {}
+                    return finish(KIND.FAILED, nil, nil, _("SSL wrap failed: ") .. tostring(ssl_err))
                 end
                 local handshake_ok, handshake_err = ssl_sock:dohandshake()
                 if not handshake_ok then
-                    ssl_sock:close()
-                    socketutil:reset_timeout()
-                    return false, _("SSL handshake failed: ") .. tostring(handshake_err), {}
+                    open_client = ssl_sock
+                    return finish(KIND.FAILED, nil, nil, _("SSL handshake failed: ") .. tostring(handshake_err))
                 end
                 client = ssl_sock
+                open_client = client
             end
 
             client:settimeout(DownloadEngine.READ_TIMEOUT)
@@ -375,26 +385,20 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
 
             local send_ok, send_err = client:send(request_str)
             if not send_ok then
-                client:close()
-                socketutil:reset_timeout()
-                return false, _("Failed to send request: ") .. tostring(send_err), {}
+                return finish(KIND.FAILED, nil, nil, _("Failed to send request: ") .. tostring(send_err))
             end
 
             -- Read HTTP Status Line
             local status_line, status_err = client:receive("*l")
             if not status_line then
-                client:close()
-                socketutil:reset_timeout()
-                return false, _("Server closed connection without response: ") .. tostring(status_err), {}
+                return finish(KIND.FAILED, nil, nil, _("Server closed connection without response: ") .. tostring(status_err))
             end
 
             status_line = status_line:gsub("[\r\n]+$", "")
             local http_ver, status_code_str, status_msg = status_line:match("^(HTTP/[%d%.]+)%s+(%d+)%s*(.*)$")
             local code = tonumber(status_code_str)
             if not code then
-                client:close()
-                socketutil:reset_timeout()
-                return false, _("Malformed HTTP status line: ") .. tostring(status_line), {}
+                return finish(KIND.FAILED, nil, nil, _("Malformed HTTP status line: ") .. tostring(status_line))
             end
 
             -- Read HTTP Response Headers
@@ -415,6 +419,7 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
             -- Step A: Handle 30x Redirects (close immediately, ignore Content-Length on 30x)
             if code >= 300 and code < 400 and headers["location"] then
                 client:close()
+                open_client = nil
                 local raw_loc = headers["location"]
                 local loc_escaped = raw_loc:gsub(" ", "%%20")
                 current_url = url_util.absolute(current_url, loc_escaped)
@@ -426,12 +431,11 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
 
                 -- Open temporary destination file
                 local tmp_filename = string.format(".lanfetch_%d_%d.tmp", os.time(), math.random(1000, 9999))
-                local part_path = target_directory .. "/" .. tmp_filename
+                part_path = target_directory .. "/" .. tmp_filename
                 local file_handle, io_err = io.open(part_path, "wb")
                 if not file_handle then
-                    client:close()
-                    socketutil:reset_timeout()
-                    return false, _("Cannot create file in destination: ") .. tostring(io_err), {}
+                    part_path = nil
+                    return finish(KIND.FAILED, nil, nil, _("Cannot create file in destination: ") .. tostring(io_err))
                 end
 
                 local bytes_received = 0
@@ -441,10 +445,7 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                 while true do
                     if abort_checker and abort_checker() then
                         file_handle:close()
-                        client:close()
-                        os.remove(part_path)
-                        socketutil:reset_timeout()
-                        return false, "aborted", {}
+                        return finish(KIND.ABORTED)
                     end
 
                     local chunk, stream_err, partial = client:receive(8192)
@@ -459,10 +460,7 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                             local cont = progress_callback(bytes_received, total_expected_bytes, percentage, speed_bps)
                             if cont == false then
                                 file_handle:close()
-                                client:close()
-                                os.remove(part_path)
-                                socketutil:reset_timeout()
-                                return false, "aborted", {}
+                                return finish(KIND.ABORTED)
                             end
                         end
                         if yield_callback then
@@ -474,20 +472,16 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                         break
                     elseif stream_err then
                         file_handle:close()
-                        client:close()
-                        os.remove(part_path)
-                        socketutil:reset_timeout()
-                        return false, T(_("Download interrupted (%1)"), tostring(stream_err)), {}
+                        return finish(KIND.FAILED, nil, nil, T(_("Download interrupted (%1)"), tostring(stream_err)))
                     end
                 end
 
                 file_handle:close()
                 client:close()
-                socketutil:reset_timeout()
+                open_client = nil
 
                 if bytes_received == 0 then
-                    os.remove(part_path)
-                    return false, _("Downloaded file is empty (0 bytes)"), {}
+                    return finish(KIND.FAILED, nil, nil, _("Downloaded file is empty (0 bytes)"))
                 end
 
                 -- Resolve and sanitize final filename
@@ -509,9 +503,9 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
 
                 local rename_ok, rename_err = os.rename(part_path, final_path)
                 if not rename_ok then
-                    os.remove(part_path)
-                    return false, _("Failed to finalize file: ") .. tostring(rename_err), {}
+                    return finish(KIND.FAILED, nil, nil, _("Failed to finalize file: ") .. tostring(rename_err))
                 end
+                part_path = nil
 
                 local metadata = {
                     url = current_url,
@@ -519,20 +513,19 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                     filename = sanitized_name,
                     content_type = headers["content-type"],
                 }
-                return true, final_path, metadata
+                return finish(KIND.COMPLETED, final_path, metadata)
 
             -- Step C: Handle HTTP 400 fallback or errors
             elseif code == 400 and not attempted_protocol_fallback and scheme == "http" then
                 client:close()
+                open_client = nil
                 attempted_protocol_fallback = true
                 current_url = current_url:gsub("^http://", "https://")
                 logger.warn("DownloadEngine: HTTP 400. Retrying HTTPS: " .. current_url)
                 visited_urls = {}
 
             else
-                client:close()
-                socketutil:reset_timeout()
-                return false, T(_("Server returned HTTP %1 (%2)"), code, tostring(status_msg or "")), {}
+                return finish(KIND.FAILED, nil, nil, T(_("Server returned HTTP %1 (%2)"), code, tostring(status_msg or "")))
             end
         end
     end

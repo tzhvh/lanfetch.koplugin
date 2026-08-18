@@ -699,26 +699,15 @@ function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
 
     local function stepDownload()
         if coroutine.status(download_co) == "suspended" then
-            local ok, success_or_err, path_or_err, meta = coroutine.resume(download_co)
+            local ok, outcome = coroutine.resume(download_co)
             if not ok then
-                UIManager:close(progress_dialog)
-                local err_msg = tostring(success_or_err)
-                if err_msg:find("aborted") or tostring(path_or_err):find("aborted") then
-                    UIManager:show(Notification:new{
-                        text = _("Download canceled."),
-                        timeout = 2,
-                    })
-                else
-                    UIManager:show(ConfirmBox:new{
-                        text = T(_("Download Error:\n%1"), err_msg),
-                        ok_text = _("Retry"),
-                        cancel_text = _("Close"),
-                        ok_callback = function()
-                            self:executeDownload(url, target_dir, custom_filename)
-                        end,
-                    })
-                end
-                return
+                -- Runtime error inside the engine: normalize into a failed outcome
+                outcome = {
+                    kind = DownloadEngine.KIND.FAILED,
+                    path = nil,
+                    meta = {},
+                    error = tostring(outcome),
+                }
             end
 
             if coroutine.status(download_co) == "suspended" then
@@ -726,41 +715,39 @@ function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
                 UIManager:nextTick(stepDownload)
             else
                 -- Coroutine completed!
+                local KIND = DownloadEngine.KIND
                 UIManager:close(progress_dialog)
-                local success = success_or_err
-                local result_or_err = path_or_err
-                if success then
+
+                if outcome.kind == KIND.COMPLETED then
                     if self.plugin and self.plugin.refreshFileManager then
                         self.plugin:refreshFileManager(target_dir)
                     end
 
                     UIManager:show(ConfirmBox:new{
                         text = T(_("Download Complete!\n\nSaved: %1\nSize: %2 MB"),
-                            result_or_err, string.format("%.2f", (meta and meta.size or 0) / (1024 * 1024))),
+                            outcome.path, string.format("%.2f", (outcome.meta.size or 0) / (1024 * 1024))),
                         ok_text = _("📖 Open PDF"),
                         cancel_text = _("Stay Here"),
                         ok_callback = function()
                             self:onClose()
                             local ReaderUI = require("apps/reader/readerui")
-                            ReaderUI:showReader(result_or_err)
+                            ReaderUI:showReader(outcome.path)
                         end,
                     })
+                elseif outcome.kind == KIND.ABORTED then
+                    UIManager:show(Notification:new{
+                        text = _("Download canceled."),
+                        timeout = 2,
+                    })
                 else
-                    if tostring(result_or_err) ~= "aborted" then
-                        UIManager:show(ConfirmBox:new{
-                            text = T(_("Download Error:\n%1"), tostring(result_or_err)),
-                            ok_text = _("Retry"),
-                            cancel_text = _("Close"),
-                            ok_callback = function()
-                                self:executeDownload(url, target_dir, custom_filename)
-                            end,
-                        })
-                    else
-                        UIManager:show(Notification:new{
-                            text = _("Download canceled."),
-                            timeout = 2,
-                        })
-                    end
+                    UIManager:show(ConfirmBox:new{
+                        text = T(_("Download Error:\n%1"), tostring(outcome.error)),
+                        ok_text = _("Retry"),
+                        cancel_text = _("Close"),
+                        ok_callback = function()
+                            self:executeDownload(url, target_dir, custom_filename)
+                        end,
+                    })
                 end
             end
         end
