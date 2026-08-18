@@ -52,6 +52,24 @@ assert_eq(DownloadEngine.sanitizeFilename("bad/file:name*?.pdf"), "file_name__.p
     "Sanitizer strips directory and unsafe chars")
 assert_eq(DownloadEngine.sanitizeFilename(".hidden.pdf"), "hidden.pdf", "Leading dot strip")
 
+-- Format neutrality: the sanitizer never rewrites a non-PDF name to PDF
+assert_eq(DownloadEngine.sanitizeFilename("book.epub"), "book.epub", "EPUB extension kept (no .pdf forcing)")
+assert_eq(DownloadEngine.sanitizeFilename("notes.md"), "notes.md", "Markdown extension kept")
+assert_eq(DownloadEngine.sanitizeFilename("photo?1"), "photo_1", "extensionless name stays bare without a content type")
+assert_eq(DownloadEngine.sanitizeFilename(nil), "download", "bare fallback name has no forced extension")
+
+-- Content-Type → extension completion (extensionless names only)
+assert_eq(DownloadEngine.extensionForContentType("application/pdf"), ".pdf", "pdf mime maps")
+assert_eq(DownloadEngine.extensionForContentType("APPLICATION/EPUB+ZIP"), ".epub", "mime lookup case-insensitive")
+assert_eq(DownloadEngine.extensionForContentType("text/html; charset=utf-8"), ".html", "content-type parameters stripped")
+assert_eq(DownloadEngine.extensionForContentType("application/x-unknown"), nil, "unknown mime → nil")
+assert_eq(DownloadEngine.sanitizeFilename("book", nil, "application/pdf"), "book.pdf", "pdf content type completes name")
+assert_eq(DownloadEngine.sanitizeFilename("book", nil, "application/epub+zip"), "book.epub", "epub content type completes name")
+assert_eq(DownloadEngine.sanitizeFilename("book", nil, "text/markdown; charset=utf-8"), "book.md", "markdown content type completes name")
+assert_eq(DownloadEngine.sanitizeFilename("book", nil, "application/x-unknown"), "book", "unmapped content type leaves name bare")
+assert_eq(DownloadEngine.sanitizeFilename("book.epub", nil, "application/pdf"), "book.epub",
+    "the name's own extension wins over the content type")
+
 local tmp_dir = os.getenv("TMPDIR") or "/tmp"
 local sandbox = tmp_dir .. "/lanfetch_test_" .. tostring(os.time())
 os.execute("mkdir -p " .. sandbox)
@@ -164,6 +182,48 @@ do
     assert_eq(#saved, #payload, "saved file size matches payload")
     assert_eq(saved == payload, true, "saved file content byte-identical")
     os.execute("rm -rf " .. sandbox2)
+end
+
+print("== Yieldable transport: non-PDF downloads keep their format ==")
+do
+    -- An EPUB whose Content-Disposition name carries no extension: the
+    -- response Content-Type must complete it (previously became ".epub.pdf").
+    local payload = string.rep("EPUB", 128)
+    local response = string.format(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/epub+zip\r\nContent-Length: %d\r\nContent-Disposition: attachment; filename=\"mybook\"\r\n\r\n%s",
+        #payload, payload)
+    local serve, port = scripted_server({ response })
+    local sandbox3 = tmp_dir .. "/lanfetch_epub_" .. tostring(os.time())
+    os.execute("mkdir -p " .. sandbox3)
+
+    local outcome = run_interleaved(
+        function()
+            return DownloadEngine.download(
+                string.format("http://127.0.0.1:%d/get", port), sandbox3, {},
+                nil, nil, function() coroutine.yield() end)
+        end,
+        serve)
+
+    assert_eq(outcome.kind, KIND.COMPLETED, "epub download completes")
+    assert_eq(outcome.meta.filename, "mybook.epub", "content-type completes extensionless name")
+    assert_eq(outcome.meta.content_type, "application/epub+zip", "content type recorded in meta")
+
+    -- An extensionless URL served as a zip: filename derives from URL + type
+    local zip_magic = string.char(0x50, 0x4B) .. string.rep("z", 64)
+    local response2 = string.format(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: %d\r\n\r\n%s",
+        #zip_magic, zip_magic)
+    local serve2, port2 = scripted_server({ response2 })
+    local outcome2 = run_interleaved(
+        function()
+            return DownloadEngine.download(
+                string.format("http://127.0.0.1:%d/docs/handbook", port2), sandbox3, {},
+                nil, nil, function() coroutine.yield() end)
+        end,
+        serve2)
+    assert_eq(outcome2.kind, KIND.COMPLETED, "zip download completes")
+    assert_eq(outcome2.meta.filename, "handbook.zip", "URL stem completed with zip extension")
+    os.execute("rm -rf " .. sandbox3)
 end
 
 print("== Yieldable transport: CANCEL lands mid-connect ==")

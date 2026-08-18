@@ -9,7 +9,7 @@ How should the target folder selector represent persistent base folders and hier
 
 ## Answer
 
-Implemented and validated via [src/folder_manager.lua](file:///home/mser/Documents/cla/exp/down2e/src/folder_manager.lua) and [tests/test_folder_manager.lua](file:///home/mser/Documents/cla/exp/down2e/tests/test_folder_manager.lua).
+Implemented and validated via [src/folder_manager.lua](../../src/folder_manager.lua) and [tests/test_folder_manager.lua](../../tests/test_folder_manager.lua).
 
 Key architectural mechanics:
 1. **Persistent Base + Subfolder Presets**: A persistent base directory (default `/mnt/onboard/documents/Downloads` or user-configured) stored in `LuaSettings` (`G_reader_settings`), accompanied by a customizable list of hierarchical subfolder presets (`Inbox`, `Articles`, `Work/Reports`, `Books/Tech`).

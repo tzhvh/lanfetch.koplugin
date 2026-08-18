@@ -9,7 +9,7 @@ How should the Octet Tabber state machine model segment selection, numeric overw
 
 ## Answer
 
-Implemented and validated via [src/octet_tabber.lua](file:///home/mser/Documents/cla/exp/down2e/src/octet_tabber.lua) and [tests/test_octet_tabber.lua](file:///home/mser/Documents/cla/exp/down2e/tests/test_octet_tabber.lua).
+Implemented and validated via [src/octet_tabber.lua](../../src/octet_tabber.lua) and [tests/test_octet_tabber.lua](../../tests/test_octet_tabber.lua).
 
 Key validated mechanics:
 1. **Segmented Data Model**: Segments are stored as discrete tokens (`o1`, `o2`, `o3`, `o4`, `port`, `path`) with an active segment index (1..6) and a boolean `is_selected` flag.

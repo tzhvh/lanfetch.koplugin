@@ -10,7 +10,7 @@ How should the plugin interface manage the transition and layout handoff between
 
 ## Answer
 
-Implemented and validated via [src/url_handoff.lua](file:///home/mser/Documents/cla/exp/down2e/src/url_handoff.lua) and [tests/test_url_handoff.lua](file:///home/mser/Documents/cla/exp/down2e/tests/test_url_handoff.lua).
+Implemented and validated via [src/url_handoff.lua](../../src/url_handoff.lua) and [tests/test_url_handoff.lua](../../tests/test_url_handoff.lua).
 
 Key architectural mechanics:
 1. **LAN Mode Default**: A full-screen `InputContainer` hosting discrete octet widgets and a high-contrast `ButtonTable` numeric/control keypad (`0-9`, `:`, `.`, `/`, `Tab`, `⌫`, `ABC`).

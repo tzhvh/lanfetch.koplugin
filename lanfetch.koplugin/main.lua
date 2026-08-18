@@ -59,6 +59,7 @@ function LanFetch:loadSettings()
     self.last_subfolder = self.settings:readSetting("last_subfolder", "Inbox")
     self.default_port = self.settings:readSetting("default_port", "9999")
     self.auto_open = self.settings:readSetting("auto_open", true)
+    self.auto_unzip = self.settings:readSetting("auto_unzip", false)
     self.has_completed_onboarding = self.settings:isTrue("has_completed_onboarding")
     self.updated = false
 end
@@ -103,7 +104,7 @@ function LanFetch:addToMainMenu(menu_items)
     -- Quick entry in File Manager tab
     if self.ui and self.ui.file_chooser then
         menu_items.lanfetch_quick = {
-            text = _("Download PDF from LAN"),
+            text = _("Download from LAN"),
             sorting_hint = "filemanager_settings",
             callback = function() self:showDownloader() end,
         }
@@ -123,7 +124,7 @@ function LanFetch:getMenuItems()
     })
     table.insert(items, { text = "───", separator = true })
     table.insert(items, {
-        text = _("Configure Base Folder"),
+        text = _("Download Settings"),
         sub_item_table = {
             {
                 text_func = function()
@@ -136,6 +137,14 @@ function LanFetch:getMenuItems()
                     return T(_("Default Port: %1"), self.default_port)
                 end,
                 callback = function() self:promptDefaultPort() end,
+            },
+            {
+                text_func = function()
+                    return T(_("Unzip Archives: %1"), self.auto_unzip and _("on") or _("off"))
+                end,
+                callback = function()
+                    self:saveFields({ auto_unzip = not self.auto_unzip })
+                end,
             },
         },
     })
@@ -215,7 +224,7 @@ function LanFetch:showOnboarding()
     UIManager:show(ConfirmBox:new{
         text = _([[Welcome to LAN PDF Downloader!
 
-Download PDFs directly from any local computer or server using a bare IP address and port.
+Download files from any local computer or server using a bare IP address and port — PDFs, EPUBs, HTML, Markdown, ZIP archives and more.
 
 Features:
 • Auto-detects your local subnet with one tap.
@@ -238,7 +247,7 @@ function LanFetch:onboardingStepFolder()
     dialog = InputDialog:new{
         title = _("Step 1 of 2: Download Folder"),
         input = self.base_dir,
-        description = _("Choose the base directory where downloaded PDFs will be saved:"),
+        description = _("Choose the base directory where downloaded files will be saved:"),
         buttons = {
             {
                 { text = _("Cancel"), callback = function() UIManager:close(dialog) end },

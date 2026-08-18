@@ -9,6 +9,7 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local ButtonTable = require("ui/widget/buttontable")
 local Button = require("ui/widget/button")
+local ButtonDialog = require("ui/widget/buttondialog")
 local TextWidget = require("ui/widget/textwidget")
 local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
@@ -33,7 +34,18 @@ local SubnetProbe = require("subnet_probe")
 local URLHandoff = require("url_handoff")
 local DownloadEngine = require("download_engine")
 local DownloadSession = require("download_session")
+local ArchiveExtractor = require("archive_extractor")
 local SESSION_STATE = DownloadSession.STATE
+
+-- File types KOReader's reader engines can open directly; anything else gets
+-- the "open containing folder" action instead of ReaderUI.
+local OPENABLE_EXTENSIONS = {
+    pdf = true, epub = true, djvu = true, djv = true,
+    cbz = true, cbr = true, fb2 = true, mobi = true,
+    azw = true, azw3 = true, prc = true, pdb = true, tcr = true,
+    txt = true, html = true, xhtml = true, rtf = true, chm = true, doc = true,
+    jpg = true, jpeg = true, png = true, gif = true, bmp = true, webp = true, svg = true,
+}
 
 local LanFetchDialog = InputContainer:extend{
     name = "lanfetch_dialog",
@@ -519,7 +531,9 @@ end
 function LanFetchDialog:startDownloadURL(target_url)
     local target_dir = self.folder_manager:getTargetPath()
     self.folder_manager:ensureTargetDirectoryExists()
-    self:ensureSession():start(target_url, target_dir)
+    self:ensureSession():start(target_url, target_dir, {
+        unzip = self.plugin and self.plugin.auto_unzip and true or false,
+    })
 end
 
 --- The UI side of the DownloadSession seam: dialogs open and close purely in
@@ -529,6 +543,7 @@ function LanFetchDialog:ensureSession()
     if not self.download_session then
         self.download_session = DownloadSession.new{
             engine = DownloadEngine,
+            extractor = ArchiveExtractor,
             schedule = function(fn) UIManager:nextTick(fn) end,
             on_state = function(state, payload)
                 self:onDownloadState(state, payload)
@@ -587,6 +602,18 @@ function LanFetchDialog:onDownloadState(state, payload)
         end
         self:showProgressDialog(payload.filename)
 
+    elseif state == SESSION_STATE.EXTRACTING then
+        self:closeProgressDialog()
+        if self.complete_dialog then
+            UIManager:close(self.complete_dialog)
+            self.complete_dialog = nil
+        end
+        self.extract_dialog = InfoMessage:new{
+            text = T(_("📦 Extracting:\n%1"), payload.filename or "archive"),
+            dismissable = false,
+        }
+        UIManager:show(self.extract_dialog)
+
     elseif state == SESSION_STATE.CANCELING then
         if self.progress_stats and self.progress_dialog then
             self.progress_stats:setText(_("Canceling download..."))
@@ -595,20 +622,98 @@ function LanFetchDialog:onDownloadState(state, payload)
 
     elseif state == SESSION_STATE.COMPLETED then
         self:closeProgressDialog()
+        if self.extract_dialog then
+            UIManager:close(self.extract_dialog)
+            self.extract_dialog = nil
+        end
         if self.plugin and self.plugin.refreshFileManager then
             self.plugin:refreshFileManager(self.folder_manager:getTargetPath())
         end
-        UIManager:show(ConfirmBox:new{
-            text = T(_("Download Complete!\n\nSaved: %1\nSize: %2 MB"),
-                payload.path, string.format("%.2f", (payload.meta and payload.meta.size or 0) / (1024 * 1024))),
-            ok_text = _("📖 Open PDF"),
-            cancel_text = _("Stay Here"),
-            ok_callback = function()
-                self:onClose()
-                local ReaderUI = require("apps/reader/readerui")
-                ReaderUI:showReader(payload.path)
-            end,
-        })
+
+        local meta = payload.meta or {}
+        local text = T(_("Download Complete!\n\nSaved: %1\nSize: %2 MB"),
+            payload.path, string.format("%.2f", (meta.size or 0) / (1024 * 1024)))
+        if meta.extracted then
+            if meta.extracted.ok then
+                text = text .. "\n" .. T(_("Extracted %1 file(s) to:\n%2"),
+                    meta.extracted.files or 0, meta.extracted.dir or payload.path)
+            else
+                text = text .. "\n" .. T(_("⚠ Extraction failed: %1\n(archive kept)"),
+                    meta.extracted.error or _("unknown error"))
+            end
+        end
+
+        -- A successful extraction yields a folder; an openable document opens
+        -- in the reader; everything else shows its containing folder.
+        local open_in_reader = false
+        if not (meta.extracted and meta.extracted.ok) then
+            local ext = payload.path and payload.path:lower():match("%.([a-z0-9]+)$") or ""
+            open_in_reader = ext ~= "" and OPENABLE_EXTENSIONS[ext] == true
+        end
+
+        -- A completed, not-yet-extracted .zip offers per-download opt-in
+        -- extraction from this dialog (the global auto_unzip setting runs the
+        -- same phase before the dialog is ever shown).
+        local zip_ready = (not (meta.extracted and meta.extracted.ok))
+            and (meta.filename or ""):lower():match("%.zip$") ~= nil
+
+        if zip_ready then
+            local dialog
+            dialog = ButtonDialog:new{
+                title = text,
+                title_align = "center",
+                buttons = {
+                    {{
+                        text = _("📦 Unzip"),
+                        callback = function()
+                            UIManager:close(dialog)
+                            self.download_session:extract()
+                        end,
+                    }},
+                    {{
+                        text = _("📂 Open Folder"),
+                        callback = function()
+                            UIManager:close(dialog)
+                            self:onClose()
+                            if self.plugin and self.plugin.openTargetFolder then
+                                local folder = payload.path:match("^(.*)/") or self.folder_manager:getTargetPath()
+                                self.plugin:openTargetFolder(folder)
+                            end
+                        end,
+                    }},
+                    {{
+                        text = _("Stay Here"),
+                        callback = function()
+                            UIManager:close(dialog)
+                        end,
+                    }},
+                },
+            }
+            self.complete_dialog = dialog
+            UIManager:show(dialog)
+        else
+            local dialog
+            dialog = ConfirmBox:new{
+                text = text,
+                ok_text = open_in_reader and _("📖 Open") or _("📂 Open Folder"),
+                cancel_text = _("Stay Here"),
+                ok_callback = function()
+                    self:onClose()
+                    if open_in_reader then
+                        local ReaderUI = require("apps/reader/readerui")
+                        ReaderUI:showReader(payload.path)
+                    elseif self.plugin and self.plugin.openTargetFolder then
+                        local folder = payload.path
+                        if not (meta.extracted and meta.extracted.ok) then
+                            folder = payload.path:match("^(.*)/") or self.folder_manager:getTargetPath()
+                        end
+                        self.plugin:openTargetFolder(folder)
+                    end
+                end,
+            }
+            self.complete_dialog = dialog
+            UIManager:show(dialog)
+        end
 
     elseif state == SESSION_STATE.FAILED then
         self:closeProgressDialog()
@@ -634,6 +739,14 @@ function LanFetchDialog:onDownloadState(state, payload)
             UIManager:close(self.probe_dialog)
             self.probe_dialog = nil
         end
+        if self.extract_dialog then
+            UIManager:close(self.extract_dialog)
+            self.extract_dialog = nil
+        end
+        if self.complete_dialog then
+            UIManager:close(self.complete_dialog)
+            self.complete_dialog = nil
+        end
     end
 end
 
@@ -642,7 +755,7 @@ function LanFetchDialog:showProgressDialog(filename)
     local stats_face = Font:getFace("cfont", 14)
 
     local title_widget = TextWidget:new{
-        text = T(_("Downloading: %1"), filename or "document.pdf"),
+        text = T(_("Downloading: %1"), filename or "file"),
         face = title_face,
         bold = true,
     }

@@ -101,9 +101,53 @@ function DownloadEngine.extractFilenameFromUrl(url_str)
     return nil
 end
 
---- Sanitize filename for safe storage on FAT32/Linux/Android filesystems
-function DownloadEngine.sanitizeFilename(filename, fallback_name)
-    fallback_name = fallback_name or "download.pdf"
+--- Preferred filename extensions for common MIME types (lowercase, parameters
+--- stripped). Used to complete extensionless filenames from what the server
+--- actually sends — never to override an extension the name already carries.
+DownloadEngine.EXTENSION_BY_CONTENT_TYPE = {
+    ["application/pdf"] = ".pdf",
+    ["application/epub+zip"] = ".epub",
+    ["application/fb2+xml"] = ".fb2",
+    ["application/x-fictionbook+xml"] = ".fb2",
+    ["application/x-mobipocket-ebook"] = ".mobi",
+    ["application/vnd.amazon.ebook"] = ".azw3",
+    ["application/zip"] = ".zip",
+    ["application/x-zip-compressed"] = ".zip",
+    ["application/x-cbz"] = ".cbz",
+    ["application/vnd.comicbook+zip"] = ".cbz",
+    ["application/x-cbr"] = ".cbr",
+    ["application/vnd.comicbook-rar"] = ".cbr",
+    ["image/vnd.djvu"] = ".djvu",
+    ["text/html"] = ".html",
+    ["application/xhtml+xml"] = ".xhtml",
+    ["text/markdown"] = ".md",
+    ["text/x-markdown"] = ".md",
+    ["text/plain"] = ".txt",
+    ["application/rtf"] = ".rtf",
+    ["application/json"] = ".json",
+    ["text/csv"] = ".csv",
+    ["image/jpeg"] = ".jpg",
+    ["image/png"] = ".png",
+    ["image/gif"] = ".gif",
+    ["image/webp"] = ".webp",
+    ["image/svg+xml"] = ".svg",
+    ["image/bmp"] = ".bmp",
+}
+
+--- Map a Content-Type header value ("text/html; charset=utf-8") to a filename
+--- extension, or nil when the MIME type is unmapped.
+function DownloadEngine.extensionForContentType(content_type)
+    if type(content_type) ~= "string" then return nil end
+    local mime = content_type:lower():gsub("%s+", ""):gsub(";.*", "")
+    return DownloadEngine.EXTENSION_BY_CONTENT_TYPE[mime]
+end
+
+--- Sanitize filename for safe storage on FAT32/Linux/Android filesystems.
+--- The filename's own extension is authoritative; an extensionless name is
+--- completed from the response Content-Type when one can be derived, and
+--- otherwise stays bare.
+function DownloadEngine.sanitizeFilename(filename, fallback_name, content_type)
+    fallback_name = fallback_name or "download"
     if not filename or filename == "" then
         filename = fallback_name
     end
@@ -123,6 +167,15 @@ function DownloadEngine.sanitizeFilename(filename, fallback_name)
         COM1=true, COM2=true, COM3=true, COM4=true, COM5=true, COM6=true, COM7=true, COM8=true, COM9=true,
         LPT1=true, LPT2=true, LPT3=true, LPT4=true, LPT5=true, LPT6=true, LPT7=true, LPT8=true, LPT9=true,
     }
+
+    if not filename:match("%.[^%.]+$") then
+        local derived_ext = DownloadEngine.extensionForContentType(content_type)
+        if derived_ext then
+            filename = filename .. derived_ext
+            name_stem = filename:match("^(.-)%.[^%.]+$") or filename
+        end
+    end
+
     if reserved[name_stem:upper()] then
         filename = "_" .. filename
     end
@@ -131,14 +184,13 @@ function DownloadEngine.sanitizeFilename(filename, fallback_name)
         filename = fallback_name
     end
 
-    if not filename:lower():match("%.pdf$") then
-        filename = filename .. ".pdf"
-    end
-
     if #filename > 200 then
-        local ext = filename:match("(%.[^%.]+)$") or ".pdf"
-        local stem = filename:sub(1, 200 - #ext)
+        local ext = filename:match("(%.[^%.]+)$") or ""
+        local stem = filename:sub(1, 200 - #ext):gsub("[%.%s]+$", "")
         filename = stem .. ext
+        if filename == "" then
+            filename = fallback_name
+        end
     end
 
     return filename
@@ -412,7 +464,8 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                     raw_filename = DownloadEngine.extractFilenameFromUrl(current_url)
                 end
 
-                local sanitized_name = DownloadEngine.sanitizeFilename(raw_filename)
+                local sanitized_name = DownloadEngine.sanitizeFilename(
+                    raw_filename, "download", headers["content-type"])
                 local final_path = target_directory .. "/" .. sanitized_name
 
                 if not options.overwrite and lfs.attributes(final_path) then

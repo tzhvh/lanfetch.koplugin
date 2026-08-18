@@ -1,0 +1,28 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+.directory
+
+# Editor & IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+
+# Lua & Testing artifacts
+luac.out
+*.rock
+luacov.stats.out
+luacov.report.out
+*.log
+
+# Runtime / Temp / Download artifacts
+*.part
+*.tmp
+
+# Environment / Local Secrets
+.env
+.env.*
+*.local

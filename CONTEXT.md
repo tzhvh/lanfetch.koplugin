@@ -1,6 +1,6 @@
 # LAN PDF Downloader
 
-A KOReader plugin for downloading PDFs served over a local area network to an e-ink reader with an IPv4-optimized keypad, portable subnet autodetection, hierarchical folder presets, and ephemeral URL state.
+A KOReader plugin for downloading files served over a local area network — PDFs, EPUBs, HTML, Markdown, ZIP archives and more — to an e-ink reader with an IPv4-optimized keypad, portable subnet autodetection, hierarchical folder presets, optional archive unzipping, and ephemeral URL state.
 
 ## Language
 
@@ -51,8 +51,20 @@ The multi-tier algorithm that extracts a suggested filename from the URL path, d
 _Avoid_: Name parser, title extractor
 
 **Filename Sanitizer**:
-The filesystem-safety filter that strips prohibited characters, trims leading/trailing dots and whitespace, and caps the filename length at 200 characters.
+The filesystem-safety filter that strips prohibited characters, trims leading/trailing dots and whitespace, and caps the filename length at 200 characters. Format-neutral: a name's own extension is authoritative; only extensionless names gain one.
 _Avoid_: Name cleaner, path validator
+
+**Content-Type Extension Resolution**:
+The rule completing an extensionless filename from the server's Content-Type header (e.g. `application/epub+zip` → `.epub`), applied at probe suggestion, confirmation, and download finalization; unmapped types keep the bare name.
+_Avoid_: MIME guessing, type sniffing
+
+**Archive Extraction Phase**:
+The `EXTRACTING` state on the DownloadSession, entered after a completed `.zip` download — automatically for attempts that opted in, or on user request from the completion dialog — extracting into a collision-free subfolder via the Archive Extractor; failure keeps the archive and soft-completes.
+_Avoid_: Unzip step, decompress stage, inflate phase
+
+**Archive Extractor**:
+The libarchive adapter (`archive_extractor.lua`) over KOReader's `ffi/archiver` that extracts archives entry-by-entry with zip-slip and bomb guards, purging the destination on any failure so no half-extracted tree survives.
+_Avoid_: Unzipper, archive manager, decompressor
 
 **Collision Handler**:
 The interactive flow presenting Overwrite, Auto-Rename (e.g. `file (1).pdf`), or Cancel options when the target filename already exists in the target folder.

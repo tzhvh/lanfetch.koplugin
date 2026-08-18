@@ -25,6 +25,7 @@ Complete architecture and technical specification for the KOReader LAN PDF Downl
 - [Hierarchical Folder Presets & Tag Switcher](issues/04-hierarchical-folder-presets.md) — Persistent base directory plus hierarchical subfolder presets rendered as a high-contrast tag ribbon with recursive on-demand directory creation.
 - [Resilient Download Pipeline & Protocol Fallbacks](issues/05-resilient-download-pipeline.md) — Yieldable `http_hop` transport (poll-loop connect/TLS/reads, abort before every yield) under a `DownloadSession` state machine: 10-hop redirect handling, transparent HTTP/HTTPS fallback, RFC 5987 parsing, typed terminal outcomes, atomic direct-to-disk .tmp streaming, and CANCEL that lands in every phase (ADR-0001).
 - [Onboarding Flow & Ephemeral State Lifecycle](issues/06-onboarding-and-ephemeral-lifecycle.md) — 2-step first-run wizard, strict in-memory RAM URL state with zero flash wear, and post-download reader invocation.
+- [Non-PDF Downloads & Optional Archive Extraction](issues/07-non-pdf-downloads-and-archive-extraction.md) — Format-neutral filenames (own extension kept; extensionless names completed from Content-Type) plus the `EXTRACTING` session phase for completed .zip archives via `archive_extractor.lua` over `ffi/archiver`/libarchive — zip-slip and bomb guards, purge-on-any-failure, soft-complete keeping the archive; entered by the `auto_unzip` setting or per-download from the success dialog's Unzip action (ADR-0002).
 
 ## Not yet specified
 

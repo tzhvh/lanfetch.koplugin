@@ -24,6 +24,7 @@ Existing workflows suffer from several friction points:
 5. **Hierarchical Tag Presets**: A scrollable subfolder ribbon with visual directory browsing (`PathChooser`) and automatic directory creation.
 6. **Native Modal Window Architecture**: A centered, movable dialog window conforming to KOReader's native event loop, providing instant dismissal ($<1\text{ms}$) with zero visual ghosting or UI freezes.
 7. **Formalized Download Lifecycle**: A session state machine (`DownloadSession`) governing each attempt from start to terminal outcome — illegal transitions are no-ops (double-tap safe), cancellation funnels through a single path that lands within one poll interval even mid-connect, and dialog teardown closes the session without zombie coroutines (ADR-0001).
+8. **Format-Neutral Downloads & Optional Unzipping**: Any file type downloads with its own filename extension intact (extensionless names are completed from the response Content-Type), and completed `.zip` archives can be extracted into a subfolder as an opt-in `EXTRACTING` session phase via libarchive (ADR-0002).
 
 ---
 
@@ -42,7 +43,7 @@ Existing workflows suffer from several friction points:
 11. As an e-reader user, I want downloads to stream directly to temporary storage (`.tmp`), so that large PDF books do not consume excessive device RAM or cause out-of-memory crashes.
 12. As an e-reader user, I want an automatic collision prompt if a file already exists, so that I can choose between auto-renaming (`file (1).pdf`), overwriting, or cancelling.
 13. As an e-reader user, I want a modal progress message showing active download status, so that I know the transfer is progressing.
-14. As an e-reader user, I want an immediate prompt with `[ 📖 Open PDF ]` once a download completes, so that I can start reading the document without searching through the file manager.
+14. As an e-reader user, I want an immediate completion prompt once a download finishes, so that I can open the document in the reader (PDF, EPUB, DjVu, …) or jump to its folder in one tap — without searching through the file manager.
 15. As an e-reader user, I want the File Manager view to refresh automatically in the background, so that newly downloaded files are instantly visible in the library.
 16. As an e-reader user, I want a top-level tag ribbon with quick-switch subfolder presets (`Inbox`, `Articles`, `Work/Reports`, `Books/Tech`), so that I can sort incoming documents into categorized folders with one tap.
 17. As an e-reader user, I want `◀` and `▶` scrolling arrows on the tag ribbon, so that I can navigate across many subfolder tags without layout clipping on narrow screens.
@@ -53,6 +54,8 @@ Existing workflows suffer from several friction points:
 22. As an e-reader user, I want high-contrast active state indicators (bold borders and checkmarks), so that selected options are crisp and legible on monochrome e-ink screens.
 23. As an e-reader user, I want to cancel a download at any time — including while the engine is still connecting or the pre-flight probe is querying — so that a wrong address never blocks my reader for the full network timeout.
 24. As an e-reader user, I want a failed download to offer a Retry that reuses my confirmed filename and target without re-probing, so that transient server errors cost one tap to recover from.
+25. As an e-reader user, I want to download any file type — EPUB, HTML, Markdown, ZIP, images — with the correct filename extension preserved (and extensionless names completed from what the server sends), so that non-PDF documents are not saved as broken `.pdf` files.
+26. As an e-reader user, I want completed `.zip` archives to offer a one-tap **Unzip** action in the success dialog, so that extraction is a per-download choice made when the file is in front of me — with an "always unzip" setting for the hands-free flow — and when extraction fails, the archive itself is kept so the download is never lost.
 
 ---
 
@@ -103,8 +106,8 @@ self.segments = { o1 = "192", o2 = "168", o3 = "3", o4 = "22", port = "9999", pa
 - Tapping `📁 Save: [Folder]` in the top action bar launches KOReader's native `PathChooser` visual filesystem browser, enabling users to re-target the base folder at any time.
 
 ### 7. DownloadSession Lifecycle (as-built, ADR-0001)
-- `download_session.lua` is a KOReader-independent state machine at the seam between the dialog and the engine: the engine, the scheduler (one coroutine step), and the `on_state`/`on_progress` observers are injected dependencies.
-- States: `IDLE → PROBING → CONFIRMING → DOWNLOADING → COMPLETED | FAILED | ABORTED`, with `CANCELING` entered on cancel from PROBING/DOWNLOADING and unwinding to `ABORTED`; any state may transition to `CLOSED`. `CONFIRMING`-cancel returns directly to `IDLE`.
+- `download_session.lua` is a KOReader-independent state machine at the seam between the dialog and the engine: the engine, the scheduler (one coroutine step), the optional archive extractor, and the `on_state`/`on_progress` observers are injected dependencies.
+- States: `IDLE → PROBING → CONFIRMING → DOWNLOADING → EXTRACTING → COMPLETED | FAILED | ABORTED`, with `CANCELING` entered on cancel from PROBING/DOWNLOADING and unwinding to `ABORTED`; any state may transition to `CLOSED`. `CONFIRMING`-cancel returns directly to `IDLE`. `EXTRACTING` is the archive-extraction phase (§10) — entered automatically after a completed `.zip` when the attempt opted in, or on user request from `COMPLETED` (the success-dialog Unzip action); it is not user-cancellable and is interrupted only by teardown.
 - **Illegal edges are no-ops** — the transition table *is* the double-tap guard: a second `start()` while active never reaches the engine, and `confirm`/`retry` outside their legal states change nothing.
 - **Single cancel path**: `session:cancel()` sets one abort flag the engine polls before every yield; the progress callback no longer doubles as a second abort channel.
 - **Retry semantics**: legal only from `FAILED` (download-phase — the probe never fails terminally), reusing the confirmed URL and filename without re-probing.
@@ -114,6 +117,18 @@ self.segments = { o1 = "192", o2 = "168", o3 = "3", o4 = "22", port = "9999", pa
 ### 8. Typed Terminal Outcome Funnel (as-built)
 - Every `download()` exit returns one uniform outcome table: `{ kind = KIND.COMPLETED|KIND.ABORTED|KIND.FAILED, path, meta, error }` with `meta` always a table and `error` nil exactly when `kind ~= FAILED` — callers never test for field presence and never string-match sentinel values.
 - All exits flow through a single `finish()` funnel owning socket close and temp-file cleanup, so exit hygiene is structural rather than repeated per branch.
+
+### 9. Format-Neutral Filenames & Content-Type Resolution (as-built)
+- The Filename Sanitizer never rewrites a name's format: a non-PDF extension is kept verbatim (previously `book.epub` became `book.epub.pdf`), and the bare fallback name is `download`, not `download.pdf`.
+- An extensionless name is completed from the Content-Type: `extensionForContentType` maps common MIME types (EPUB, HTML/XHTML, Markdown, text, ZIP, CBZ/CBR, DjVu, FB2, MOBI/AZW3, images, Office, JSON, CSV) to extensions, with parameters stripped (`text/html; charset=utf-8` → `.html`). Unmapped types keep the bare name; a name's own extension always wins over the Content-Type.
+- The Content-Type flows from three points: the Pre-Flight Metadata Probe (headers captured by the session, used for the suggested name in the Pre-Download Confirmation and again at confirm time for a user-edited extensionless name) and the engine's final sanitize against the real response headers.
+
+### 10. Opt-In Archive Extraction — the EXTRACTING Phase (as-built, ADR-0002)
+- Extraction lives in `archive_extractor.lua`, an adapter over KOReader's `ffi/archiver` (libarchive): `Reader:open` → `iterate` → `extractToPath` per entry — the same pattern as plugin OTA flows. The archiver implementation is injectable, so the module is testable headless with a fake.
+- Uniform result `{ ok, files, error, aborted }` with one exit rule: unless every entry extracted cleanly, the destination directory is purged — no half-extracted trees. Safety: Lua-level guards reject absolute paths, backslash separators, drive letters, `..` segments (zip-slip), and duplicate entry paths, on top of libarchive's `ARCHIVE_EXTRACT_SECURE_NODOTDOT`; links/devices are never materialized; caps of 2000 entries and 1 GiB total uncompressed size guard archive bombs.
+- The session enters `EXTRACTING` two ways: automatically, when the attempt opted in (`{ unzip = true }` on `start`), an extractor is injected, and the completed file is a `.zip` by its sanitized filename; or on user request via `session:extract()` from `COMPLETED` — legal only for a completed, not-yet-successfully-extracted `.zip` (the success-dialog Unzip action; also the retry path after a failed auto-extraction). `.epub`/`.cbz` are zip containers the reader must keep intact and never extract. Extraction targets a collision-free subfolder named after the archive stem (`getUniqueFilename`), runs in its own coroutine yielding between entries, and is aborted by teardown through the shared abort flag.
+- Failure semantics: the archive is already safely on disk, so extraction failure never fails the attempt — the session soft-completes with the archive path and the error in `meta.extracted`. On success the outcome path repoints at the extraction directory (`meta.extracted = { ok, dir, files }`); the `.zip` itself is kept (never silently delete user data).
+- UI: a non-dismissable "📦 Extracting" message during the phase; the completion box reports extracted files or the kept-archive warning, and its primary action is extension-aware — "📖 Open" via ReaderUI for KOReader-openable types, "📂 Open Folder" otherwise. An unextracted `.zip` gets a three-action success dialog (ButtonDialog): **📦 Unzip** (fires the `COMPLETED → EXTRACTING` edge; the dialog re-appears with results), **📂 Open Folder**, **Stay Here**. The persisted `auto_unzip` setting (default off, toggled from the menu's Download Settings) runs the same phase automatically before the dialog is shown.
 
 ---
 
@@ -128,10 +143,11 @@ self.segments = { o1 = "192", o2 = "168", o3 = "3", o4 = "22", port = "9999", pa
 2. **`tests/test_subnet_probe.lua`**: Verifies CIDR network address calculations for /24, /16, /8 subnets and active kernel IP detection.
 3. **`tests/test_url_handoff.lua`**: Verifies bidirectional conversion between IPv4 URLs and structured octet arrays, handling custom ports and paths.
 4. **`tests/test_folder_manager.lua`**: Verifies target path concatenation, preset tagging, active tag switching, and `util.makePath` directory creation.
-5. **`tests/test_download_engine.lua`**: Verifies the terminal-funnel contract (uniform outcome shape, no temp-file leakage on failure) plus interleaved mock-server scenarios — byte-identical streaming, CANCEL landing mid-connect, probe redirect-following and cancellation, and fast TLS-handshake failure. The interleaved harness drives the engine in a coroutine and pumps the mock server between engine yields, which is only possible because the transport is yieldable.
-6. **`tests/test_download_session.lua`**: Drives the session state machine headless with a fake engine and a manual scheduler — transition guards (double-tap START, illegal confirm/retry), cancel in every phase, retry reusing confirmed args, runtime-error normalization to FAILED, and CLOSED inertness to late engine outcomes.
+5. **`tests/test_download_engine.lua`**: Verifies the terminal-funnel contract (uniform outcome shape, no temp-file leakage on failure), format-neutral filename sanitization and Content-Type extension completion, plus interleaved mock-server scenarios — byte-identical streaming (PDF and non-PDF), CANCEL landing mid-connect, probe redirect-following and cancellation, and fast TLS-handshake failure. The interleaved harness drives the engine in a coroutine and pumps the mock server between engine yields, which is only possible because the transport is yieldable.
+6. **`tests/test_download_session.lua`**: Drives the session state machine headless with a fake engine (and fake extractor) plus a manual scheduler — transition guards (double-tap START, illegal confirm/retry), cancel in every phase, retry reusing confirmed args, runtime-error normalization to FAILED, the EXTRACTING matrix (opt-in gating, `.epub` kept intact, soft-failure keeping the archive, collision uniquifying, teardown inertness), and CLOSED inertness to late engine outcomes.
 7. **`tests/test_http_hop.lua`**: Exercises the hop interface directly — body-positioned client on 200, Host-header port rule, aborted sentinel mid-connect, and malformed-status staging.
-8. **Live Runtime Integration**: Verified inside the KOReader LuaJIT environment (`koreader-emulator-x86_64-redhat-linux-debug`) against active live HTTP sharing servers (`192.168.3.22:9999`), testing pre-flight probing, 302 redirects, and 94.9 KB PDF transfers.
+8. **`tests/test_archive_extractor.lua`**: Fake `ffi/archiver` over a real filesystem — entry-path safety (zip-slip, absolute, backslash, duplicates), purge-the-destination on every failure mode, abort between entries, archive-bomb caps, and skip of non-file entry types.
+9. **Live Runtime Integration**: Verified inside the KOReader LuaJIT environment (`koreader-emulator-x86_64-redhat-linux-debug`) against active live HTTP sharing servers (`192.168.3.22:9999`), testing pre-flight probing, 302 redirects, and 94.9 KB PDF transfers. `tests/smoke_archive_extractor_koreader.lua` extends this environment with a real-libarchive round trip — a system-built zip extracted byte-identically through `ffi/archiver`, a corrupt archive rejected, and a python-crafted zip-slip archive refused with the destination purged.
 
 ---
 
@@ -146,6 +162,6 @@ self.segments = { o1 = "192", o2 = "168", o3 = "3", o4 = "22", port = "9999", pa
 
 ## Further Notes
 
-- Settings are persisted in `settings/lanfetch.lua` (`base_dir`, `presets`, `default_port`, `has_completed_onboarding`).
-- All active input data (typed IP, port, path, probe cache) remains strictly ephemeral in memory and is cleared upon dialog exit.
-- As-built gap: collision handling currently auto-renames silently (`name (1).pdf`); the interactive collision prompt of story 12 (Overwrite / Auto-Rename / Cancel) awaits a future `COLLIDING` state on the DownloadSession machine — tracked in `issues/05-resilient-download-pipeline.md`.
+- Settings are persisted in `settings/lanfetch.lua` (`base_dir`, `presets`, `default_port`, `auto_open`, `auto_unzip`, `has_completed_onboarding`).
+- All active input data (typed IP, port, path, probe cache) remains strictly ephemeral in memory and cleared upon dialog exit.
+- As-built gap: collision handling currently auto-renames silently (`name (1).ext`); the interactive collision prompt of story 12 (Overwrite / Auto-Rename / Cancel) awaits a future `COLLIDING` state on the DownloadSession machine — tracked in `issues/05-resilient-download-pipeline.md`.
