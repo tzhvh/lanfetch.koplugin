@@ -427,7 +427,7 @@ function LanFetchDialog:showAddFolderDialog()
         description = _("Enter subfolder name (e.g. Papers/AI):"),
         buttons = {
             {
-                { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                { text = _("Cancel"), callback = function() UIManager:close(dialog, "ui") end },
                 { text = _("Add"), callback = function()
                     local val = dialog:getInputText()
                     if val and val:match("%S") then
@@ -438,7 +438,7 @@ function LanFetchDialog:showAddFolderDialog()
                         self.tag_scroll_offset = math.max(1, #self.folder_manager:getPresetTagItems() - 2)
                         self:refreshUI()
                     end
-                    UIManager:close(dialog)
+                    UIManager:close(dialog, "ui")
                 end },
             }
         }
@@ -474,7 +474,7 @@ function LanFetchDialog:showChangeBaseFolderDialog()
             description = _("Enter base directory path:"),
             buttons = {
                 {
-                    { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                    { text = _("Cancel"), callback = function() UIManager:close(dialog, "ui") end },
                     { text = _("Save"), callback = function()
                         local val = dialog:getInputText()
                         if val and val:match("%S") then
@@ -485,7 +485,7 @@ function LanFetchDialog:showChangeBaseFolderDialog()
                             end
                             self:refreshUI()
                         end
-                        UIManager:close(dialog)
+                        UIManager:close(dialog, "ui")
                     end },
                 }
             }
@@ -528,7 +528,7 @@ function LanFetchDialog:switchToAlphanumericMode()
         description = _("Enter any URL, domain name, or IPv6 address:"),
         buttons = {
             {
-                { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                { text = _("Cancel"), callback = function() UIManager:close(dialog, "ui") end },
                 { text = _("⇄ LAN Mode"), callback = function()
                     local raw = dialog:getInputText()
                     local ok, octs, port, path = URLHandoff.parseURL(raw)
@@ -541,7 +541,7 @@ function LanFetchDialog:switchToAlphanumericMode()
                         self.tabber.segments.path = path
                         self.tabber.active_index = 4
                         self.tabber.is_selected = true
-                        UIManager:close(dialog)
+                        UIManager:close(dialog, "ui")
                         self:refreshUI()
                     else
                         UIManager:show(Notification:new{
@@ -552,7 +552,7 @@ function LanFetchDialog:switchToAlphanumericMode()
                 end },
                 { text = _("↓ Download"), callback = function()
                     local raw = dialog:getInputText()
-                    UIManager:close(dialog)
+                    UIManager:close(dialog, "ui")
                     self:startDownloadURL(raw)
                 end },
             }
@@ -603,7 +603,7 @@ function LanFetchDialog:onDownloadState(state, payload)
 
     elseif state == SESSION_STATE.CONFIRMING then
         if self.probe_dialog then
-            UIManager:close(self.probe_dialog)
+            UIManager:close(self.probe_dialog, "ui")
             self.probe_dialog = nil
         end
         local desc_text = T(_("Saving to:\n%1"), payload.target_dir)
@@ -618,12 +618,12 @@ function LanFetchDialog:onDownloadState(state, payload)
             buttons = {
                 {
                     { text = _("Cancel"), callback = function()
-                        UIManager:close(dialog)
+                        UIManager:close(dialog, "ui")
                         self.download_session:cancel()
                     end },
                     { text = _("Download"), callback = function()
                         local name = dialog:getInputText()
-                        UIManager:close(dialog)
+                        UIManager:close(dialog, "ui")
                         self.download_session:confirm(name)
                     end },
                 }
@@ -634,7 +634,7 @@ function LanFetchDialog:onDownloadState(state, payload)
 
     elseif state == SESSION_STATE.DOWNLOADING then
         if self.probe_dialog then
-            UIManager:close(self.probe_dialog)
+            UIManager:close(self.probe_dialog, "ui")
             self.probe_dialog = nil
         end
         self:showProgressDialog(payload.filename)
@@ -642,7 +642,7 @@ function LanFetchDialog:onDownloadState(state, payload)
     elseif state == SESSION_STATE.EXTRACTING then
         self:closeProgressDialog()
         if self.complete_dialog then
-            UIManager:close(self.complete_dialog)
+            UIManager:close(self.complete_dialog, "ui")
             self.complete_dialog = nil
         end
         self.extract_dialog = InfoMessage:new{
@@ -660,7 +660,7 @@ function LanFetchDialog:onDownloadState(state, payload)
     elseif state == SESSION_STATE.COMPLETED then
         self:closeProgressDialog()
         if self.extract_dialog then
-            UIManager:close(self.extract_dialog)
+            UIManager:close(self.extract_dialog, "ui")
             self.extract_dialog = nil
         end
         if self.plugin and self.plugin.refreshFileManager then
@@ -703,14 +703,14 @@ function LanFetchDialog:onDownloadState(state, payload)
                     {{
                         text = _("Unzip"),
                         callback = function()
-                            UIManager:close(dialog)
+                            UIManager:close(dialog, "ui")
                             self.download_session:extract()
                         end,
                     }},
                     {{
                         text = _("Open Folder"),
                         callback = function()
-                            UIManager:close(dialog)
+                            UIManager:close(dialog, "ui")
                             self:onClose()
                             if self.plugin and self.plugin.openTargetFolder then
                                 local folder = payload.path:match("^(.*)/") or self.folder_manager:getTargetPath()
@@ -721,7 +721,7 @@ function LanFetchDialog:onDownloadState(state, payload)
                     {{
                         text = _("Stay Here"),
                         callback = function()
-                            UIManager:close(dialog)
+                            UIManager:close(dialog, "ui")
                         end,
                     }},
                 },
@@ -773,15 +773,15 @@ function LanFetchDialog:onDownloadState(state, payload)
     elseif state == SESSION_STATE.CLOSED then
         self:closeProgressDialog()
         if self.probe_dialog then
-            UIManager:close(self.probe_dialog)
+            UIManager:close(self.probe_dialog, "ui")
             self.probe_dialog = nil
         end
         if self.extract_dialog then
-            UIManager:close(self.extract_dialog)
+            UIManager:close(self.extract_dialog, "ui")
             self.extract_dialog = nil
         end
         if self.complete_dialog then
-            UIManager:close(self.complete_dialog)
+            UIManager:close(self.complete_dialog, "ui")
             self.complete_dialog = nil
         end
     end
@@ -855,7 +855,7 @@ end
 
 function LanFetchDialog:closeProgressDialog()
     if self.progress_dialog then
-        UIManager:close(self.progress_dialog)
+        UIManager:close(self.progress_dialog, "ui")
         self.progress_dialog = nil
         self.progress_bar = nil
         self.progress_stats = nil
@@ -893,7 +893,11 @@ function LanFetchDialog:onClose()
     if self.download_session then
         self.download_session:handleClose()
     end
-    UIManager:close(self)
+    -- Explicit refresh: bare close enqueues nothing, and a button-driven
+    -- close always has the button's unhighlight refresh in flight, which
+    -- suppresses UIManager's full-screen fallback — the closed dialog's
+    -- pixels would stay on the panel until something else touched them.
+    UIManager:close(self, "ui")
 end
 
 return LanFetchDialog

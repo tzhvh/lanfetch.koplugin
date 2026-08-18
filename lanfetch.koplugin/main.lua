@@ -187,7 +187,7 @@ function LanFetch:promptBaseFolder()
         description = _("All downloads will be stored inside this directory:"),
         buttons = {
             {
-                { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                { text = _("Cancel"), callback = function() UIManager:close(dialog, "ui") end },
                 { text = _("Save"), callback = function()
                     local val = dialog:getInputText()
                     if val and val:match("%S") then
@@ -197,7 +197,7 @@ function LanFetch:promptBaseFolder()
                         self.folder_manager:setBaseDir(val)
                         self:saveFields({ base_dir = val })
                     end
-                    UIManager:close(dialog)
+                    UIManager:close(dialog, "ui")
                 end },
             }
         }
@@ -213,14 +213,14 @@ function LanFetch:promptDefaultPort()
         input = tostring(self.default_port),
         buttons = {
             {
-                { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                { text = _("Cancel"), callback = function() UIManager:close(dialog, "ui") end },
                 { text = _("Save"), callback = function()
                     local val = dialog:getInputText()
                     if val and tonumber(val) then
                         self.default_port = val
                         self:saveFields({ default_port = val })
                     end
-                    UIManager:close(dialog)
+                    UIManager:close(dialog, "ui")
                 end },
             }
         }
@@ -259,7 +259,7 @@ function LanFetch:onboardingStepFolder()
         description = _("Choose the base directory where downloaded files will be saved:"),
         buttons = {
             {
-                { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                { text = _("Cancel"), callback = function() UIManager:close(dialog, "ui") end },
                 { text = _("Next"), callback = function()
                     local val = dialog:getInputText()
                     if val and val:match("%S") then
@@ -268,7 +268,7 @@ function LanFetch:onboardingStepFolder()
                         self.base_dir = val
                         self.folder_manager:setBaseDir(val)
                         self:saveFields({ base_dir = val })
-                        UIManager:close(dialog)
+                        UIManager:close(dialog, "ui")
                         self:onboardingStepTips()
                     end
                 end },
