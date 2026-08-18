@@ -3,6 +3,10 @@
 A KOReader plugin that downloads PDFs (and other files) from a local web server on your network directly to your e-reader.  
 Useful with apps like *Share via HTTP*, Python’s `http.server`, Calibre’s content server, or any simple LAN file server.
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="LAN PDF Downloader for KOReader" width="380">
+</p>
+
 ---
 
 ## Features
@@ -46,7 +50,7 @@ Restart KOReader (or reload plugins) after copying.
 
 1. Tap **Detect Subnet** (or wait for auto-detection) to fill the local network prefix, e.g. `192.168.3.`.
 2. Enter the remaining host octet, e.g. `22`.
-3. Tap **⇥ Tab** to move to the **Port** field and enter the port, e.g. `9999`.
+3. Tap **→ Tab** to move to the **Port** field and enter the port, e.g. `9999`.
 4. Tap **↓ DOWNLOAD**.
 5. The plugin checks the server and shows a confirmation with the actual file name and size.
 6. Confirm the save location and tap **Download**.
