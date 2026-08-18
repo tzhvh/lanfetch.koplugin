@@ -15,6 +15,7 @@ Useful with apps like *Share via HTTP*, Python’s `http.server`, Calibre’s co
 - **Folder presets** – quick tags for common save locations (`Inbox`, `Articles`, etc.), with automatic folder creation.
 - **Native KOReader dialog** – opens and closes instantly, no lag on e-ink screens.
 - **Post-download action** – offers **Open PDF** immediately after saving.
+- **Zero I/O at launch** – the plugin registers its menus and touches nothing else until you open it: no settings reads, no folder creation, no popups.
 
 ---
 
@@ -74,6 +75,7 @@ lua tests/test_folder_manager.lua
 lua tests/test_download_engine.lua
 lua tests/test_download_session.lua
 lua tests/test_http_hop.lua
+lua tests/test_plugin_lifecycle.lua
 ```
 
 Syntax check all Lua files:

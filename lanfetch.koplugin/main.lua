@@ -7,12 +7,10 @@ local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local UIManager = require("ui/uimanager")
 local Dispatcher = require("dispatcher")
-local Notification = require("ui/widget/notification")
 local ConfirmBox = require("ui/widget/confirmbox")
 local InputDialog = require("ui/widget/inputdialog")
 local FileManager = require("apps/filemanager/filemanager")
 local util = require("util")
-local logger = require("logger")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
@@ -28,29 +26,29 @@ local function getDefaultDownloadPath()
     return DataStorage:getDataDir() .. "/Downloads"
 end
 
+--- Registrations only. No settings I/O, directory creation, or dialogs run at
+--- KOReader launch — plugin-authored filesystem work is deferred until the
+--- user first invokes the plugin (see ensureState).
 function LanFetch:init()
+    self:onDispatcherRegisterActions()
+    if self.ui and self.ui.menu then
+        self.ui.menu:registerToMainMenu(self)
+    end
+end
+
+--- Opens the settings file and builds the folder manager on first use.
+--- Idempotent; every user-invoked entry point calls it before touching state.
+function LanFetch:ensureState()
+    if self.settings then return end
     self.settings_file = DataStorage:getSettingsDir() .. "/lanfetch.lua"
     self.settings = LuaSettings:open(self.settings_file)
     self:loadSettings()
-    
+
     self.folder_manager = FolderManager.new(
         self.base_dir,
         self.presets,
         self.last_subfolder
     )
-
-    self:onDispatcherRegisterActions()
-    if self.ui and self.ui.menu then
-        self.ui.menu:registerToMainMenu(self)
-    end
-
-    if not self.has_completed_onboarding then
-        UIManager:nextTick(function()
-            self:showOnboarding()
-        end)
-    else
-        util.makePath(self.base_dir)
-    end
 end
 
 function LanFetch:loadSettings()
@@ -65,13 +63,14 @@ function LanFetch:loadSettings()
 end
 
 function LanFetch:onFlushSettings()
-    if self.updated then
+    if self.updated and self.settings then
         self.settings:flush()
         self.updated = false
     end
 end
 
 function LanFetch:saveFields(fields)
+    self:ensureState()
     for key, value in pairs(fields) do
         self[key] = value
         self.settings:saveSetting(key, value)
@@ -112,6 +111,7 @@ function LanFetch:addToMainMenu(menu_items)
 end
 
 function LanFetch:getMenuItems()
+    self:ensureState()
     local items = {}
 
     table.insert(items, {
@@ -157,6 +157,12 @@ function LanFetch:getMenuItems()
 end
 
 function LanFetch:showDownloader()
+    self:ensureState()
+    if not self.has_completed_onboarding then
+        -- First-run onboarding fires on first plugin open, never at launch.
+        self:showOnboarding()
+        return
+    end
     local dialog = LanFetchDialog:new{
         plugin = self,
         folder_manager = self.folder_manager,
@@ -173,6 +179,7 @@ function LanFetch:showDownloader()
 end
 
 function LanFetch:promptBaseFolder()
+    self:ensureState()
     local dialog
     dialog = InputDialog:new{
         title = _("Configure Base Download Folder"),
@@ -199,6 +206,7 @@ function LanFetch:promptBaseFolder()
 end
 
 function LanFetch:promptDefaultPort()
+    self:ensureState()
     local dialog
     dialog = InputDialog:new{
         title = _("Default LAN Port"),
@@ -221,6 +229,7 @@ function LanFetch:promptDefaultPort()
 end
 
 function LanFetch:showOnboarding()
+    self:ensureState()
     UIManager:show(ConfirmBox:new{
         text = _([[Welcome to LAN PDF Downloader!
 
@@ -291,6 +300,7 @@ function LanFetch:onboardingStepTips()
 end
 
 function LanFetch:openTargetFolder(path)
+    self:ensureState()
     util.makePath(path)
     if FileManager.instance then
         FileManager.instance:reinit(path)
