@@ -100,6 +100,7 @@ lua tests/test_url_handoff.lua
 lua tests/test_folder_manager.lua
 lua tests/test_download_engine.lua
 lua tests/test_download_session.lua
+lua tests/test_http_hop.lua
 ```
 
 ---

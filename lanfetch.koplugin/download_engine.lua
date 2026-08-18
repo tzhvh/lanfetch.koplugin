@@ -3,15 +3,14 @@ DownloadEngine: Resilient HTTP/HTTPS streaming download engine for KOReader.
 Handles non-standard LAN HTTP servers (e.g. ShareViaHttp, Python http.server, Calibre),
 RFC 5987 Content-Disposition parsing, unencoded redirect paths with spaces,
 pre-download filename derivation from redirects, and atomic direct-to-disk streaming without memory buffering.
-All socket operations run through a yieldable poll transport (poll_connect, poll_handshake,
-poll_send, poll_receive_line, poll_receive_chunk): short per-socket timeouts with
-abort-check-then-yield loops, so cancellation lands within one poll interval even
-during connect or TLS handshake, and the KOReader event loop keeps pumping.
+Every network hop runs through http_hop's yieldable poll transport, so
+cancellation lands within one poll interval even during connect or TLS
+handshake, and the KOReader event loop keeps pumping.
 --]]--
 
 local socket = require("socket")
-local ssl = pcall(require, "ssl") and require("ssl") or nil
 local url_util = require("socket.url")
+local http_hop = require("http_hop")
 
 local ok_log, logger = pcall(require, "logger")
 if not ok_log or not logger then
@@ -56,126 +55,6 @@ DownloadEngine.KIND = {
     ABORTED = "aborted",
     FAILED = "failed",
 }
-
---- Poll interval for the yieldable transport: every blocking socket operation is
---- retried at this granularity, and the abort checker runs before each yield, so
---- a CANCEL lands within one interval even during connect or TLS handshake.
-local POLL_INTERVAL = 0.2
-
-local function poll_aborted(opts)
-    return opts.abort_checker and opts.abort_checker()
-end
-
---- Yieldable connect: retries the same socket (verified on Linux/LuaSocket — a
---- timed-out connect leaves the socket reusable) until connected, refused, aborted,
---- or the wall-clock cap expires. Aborts are checked before yielding.
-local function poll_connect(sock, host, port, opts)
-    local deadline = socket.gettime() + (opts.connect_timeout or DownloadEngine.CONNECT_TIMEOUT)
-    sock:settimeout(POLL_INTERVAL)
-    while true do
-        local ok, err = sock:connect(host, port)
-        if ok then
-            return true
-        elseif err == "timeout" then
-            if poll_aborted(opts) then return nil, "aborted" end
-            if socket.gettime() >= deadline then return nil, "timeout" end
-            if opts.yield_callback then opts.yield_callback() end
-        else
-            return nil, err
-        end
-    end
-end
-
---- Yieldable TLS handshake: LuaSec surfaces "want read"/"want write" while the
---- handshake is in flight; poll those with abort checks and yields.
-local function poll_handshake(sock, opts)
-    local deadline = socket.gettime() + (opts.connect_timeout or DownloadEngine.CONNECT_TIMEOUT)
-    sock:settimeout(POLL_INTERVAL)
-    while true do
-        local ok, err = sock:dohandshake()
-        if ok then
-            return true
-        elseif err == "want read" or err == "want write" or err == "timeout" then
-            if poll_aborted(opts) then return nil, "aborted" end
-            if socket.gettime() >= deadline then return nil, "timeout" end
-            if opts.yield_callback then opts.yield_callback() end
-        else
-            return nil, err
-        end
-    end
-end
-
---- Yieldable send: resumes from the last byte index on partial sends.
-local function poll_send(sock, data, opts)
-    local deadline = socket.gettime() + (opts.write_timeout or DownloadEngine.READ_TIMEOUT)
-    sock:settimeout(POLL_INTERVAL)
-    local next_idx = 1
-    while true do
-        local last, err, partial_last = sock:send(data, next_idx)
-        if last then
-            if last >= #data then return true end
-            next_idx = last + 1
-        elseif err == "timeout" then
-            if partial_last and partial_last >= next_idx then next_idx = partial_last + 1 end
-            if poll_aborted(opts) then return nil, "aborted" end
-            if socket.gettime() >= deadline then return nil, "timeout" end
-            if opts.yield_callback then opts.yield_callback() end
-        else
-            return nil, err
-        end
-    end
-end
-
---- Yieldable line receive. On timeout, receive("*l") drains its buffer into the
---- partial return, so fragments are accumulated until the newline arrives.
---- Returns line, nil on success; nil, err on failure ("closed" may still deliver
---- a final unterminated line as the first return).
-local function poll_receive_line(sock, opts)
-    local deadline = socket.gettime() + (opts.read_timeout or DownloadEngine.READ_TIMEOUT)
-    sock:settimeout(POLL_INTERVAL)
-    local acc = nil
-    while true do
-        local line, err, partial = sock:receive("*l")
-        if line then
-            return acc and (acc .. line) or line
-        end
-        if partial and #partial > 0 then
-            acc = acc and (acc .. partial) or partial
-        end
-        if err == "timeout" then
-            if poll_aborted(opts) then return nil, "aborted" end
-            if socket.gettime() >= deadline then return nil, "timeout" end
-            if opts.yield_callback then opts.yield_callback() end
-        elseif err == "closed" then
-            return acc, "closed"
-        else
-            return nil, err
-        end
-    end
-end
-
---- Yieldable chunk receive. Returns data (possibly ""), nil+err otherwise
---- ("closed" = EOF, "aborted", or a transport error).
-local function poll_receive_chunk(sock, size, opts)
-    local deadline = socket.gettime() + (opts.read_timeout or DownloadEngine.READ_TIMEOUT)
-    sock:settimeout(POLL_INTERVAL)
-    while true do
-        local chunk, err, partial = sock:receive(size)
-        if chunk then
-            return chunk
-        end
-        if partial and #partial > 0 then
-            return partial
-        end
-        if err == "timeout" then
-            if poll_aborted(opts) then return nil, "aborted" end
-            if socket.gettime() >= deadline then return nil, "timeout" end
-            if opts.yield_callback then opts.yield_callback() end
-        else
-            return nil, err
-        end
-    end
-end
 
 --- Parse Content-Disposition header conforming to RFC 6266 & RFC 5987
 function DownloadEngine.parseContentDisposition(header_val)
@@ -300,18 +179,19 @@ function DownloadEngine.sweepOrphanTempFiles(target_dir)
 end
 
 --- Lightweight pre-flight probe: Follows redirects to derive filename and file size
---- before download prompt. Yieldable and cancellable per operation: abort_checker is
+--- before download prompt. One yieldable http_hop per attempt: abort_checker is
 --- polled before every yield, so CANCEL lands mid-connect, not just between hops.
 --- Returns (name_or_nil, final_url, size_or_nil, headers_or_nil); network failures
 --- never throw, they degrade to nil results for the caller to soft-handle.
 function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec, abort_checker, yield_callback)
     timeout_sec = timeout_sec or 5
-    local poll_opts = {
+    local hop_opts = {
         abort_checker = abort_checker,
         yield_callback = yield_callback,
         connect_timeout = timeout_sec,
         read_timeout = timeout_sec,
         write_timeout = timeout_sec,
+        user_agent = "KOReader/Downloader",
     }
     local current_url = initial_url
     local redirect_count = 0
@@ -322,60 +202,12 @@ function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec, abort_chec
         if visited_urls[current_url] then break end
         visited_urls[current_url] = true
 
-        local parsed = url_util.parse(current_url)
-        if not parsed or not parsed.host then break end
+        local ok, res = http_hop.performGet(current_url, hop_opts)
+        if not ok then break end -- any failure, including abort, soft-degrades
 
-        local scheme = (parsed.scheme or "http"):lower()
-        local host = parsed.host
-        local port = tonumber(parsed.port) or (scheme == "https" and 443 or 80)
-        local path = parsed.path or "/"
-        if parsed.query then path = path .. "?" .. parsed.query end
-        path = path:gsub(" ", "%%20")
-        if not path:match("^/") then path = "/" .. path end
-
-        local tcp = socket.tcp()
-        local conn_ok = poll_connect(tcp, host, port, poll_opts)
-        if not conn_ok then
-            tcp:close()
-            break
-        end
-
-        local client = tcp
-        if scheme == "https" then
-            if not ssl then tcp:close(); break end
-            local ssl_sock = ssl.wrap(tcp, { mode = "client", protocol = "any", verify = "none", options = "all" })
-            if not ssl_sock then tcp:close(); break end
-            if not poll_handshake(ssl_sock, poll_opts) then ssl_sock:close(); break end
-            client = ssl_sock
-        end
-
-        local host_header = (port == 80 or port == 443) and host or string.format("%s:%d", host, port)
-        local req = string.format("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: KOReader/Downloader\r\nAccept: */*\r\nConnection: close\r\n\r\n", path, host_header)
-        if not poll_send(client, req, poll_opts) then
-            client:close()
-            break
-        end
-
-        local status_line = poll_receive_line(client, poll_opts)
-        if not status_line then
-            client:close()
-            break
-        end
-
-        status_line = status_line:gsub("[\r\n]+$", "")
-        local http_ver, code_str = status_line:match("^(HTTP/[%d%.]+)%s+(%d+)")
-        local code = tonumber(code_str) or 0
-
-        local headers = {}
-        while true do
-            local line = poll_receive_line(client, poll_opts)
-            if not line then break end
-            line = line:gsub("[\r\n]+$", "")
-            if line == "" then break end
-            local hk, hv = line:match("^([^:]+):%s*(.*)$")
-            if hk then headers[hk:lower()] = hv end
-        end
-        client:close()
+        res.client:close()
+        local code = res.code
+        local headers = res.headers
 
         if code >= 300 and code < 400 and headers["location"] then
             local raw_loc = headers["location"]
@@ -404,18 +236,27 @@ function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec, abort_chec
     return fallback_url_name or last_location_name, current_url, nil, nil
 end
 
------ Resilient Socket Transport: Handles HTTP/HTTPS, redirects with raw spaces & broken 302 Content-Lengths
+----- Resilient Download: redirect policy, protocol fallback, streaming, atomic
+----- finalization — one yieldable http_hop per attempt
 function DownloadEngine.download(initial_url, target_directory, options, progress_callback, abort_checker, yield_callback)
     local KIND = DownloadEngine.KIND
     options = options or {}
+    local model_name = "KOReader"
+    if ok_dev and Device and Device.getModel then
+        pcall(function() model_name = Device:getModel() end)
+    end
+    local hop_opts = {
+        abort_checker = abort_checker,
+        yield_callback = yield_callback,
+        connect_timeout = DownloadEngine.CONNECT_TIMEOUT,
+        read_timeout = DownloadEngine.READ_TIMEOUT,
+        write_timeout = DownloadEngine.READ_TIMEOUT,
+        user_agent = string.format("KOReader lanfetch/%s (%s)", "1.0", tostring(model_name)),
+    }
     local current_url = initial_url
     local redirect_count = 0
     local visited_urls = {}
     local attempted_protocol_fallback = false
-    local poll_opts = {
-        abort_checker = abort_checker,
-        yield_callback = yield_callback,
-    }
 
     -- Terminal funnel: the single exit path from this function. Closes the live
     -- socket and removes the partial temp file unless the download completed.
@@ -447,140 +288,46 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
         end
         visited_urls[current_url] = true
 
-        -- Parse current URL
-        local parsed = url_util.parse(current_url)
-        if not parsed or not parsed.host then
-            return finish(KIND.FAILED, nil, nil, _("Invalid URL: ") .. tostring(current_url))
-        end
+        local hop_ok, res = http_hop.performGet(current_url, hop_opts)
 
-        local scheme = (parsed.scheme or "http"):lower()
-        local host = parsed.host
-        local port = tonumber(parsed.port) or (scheme == "https" and 443 or 80)
-        local path = parsed.path or "/"
-        if parsed.query then
-            path = path .. "?" .. parsed.query
-        end
-
-        -- Auto-escape raw spaces and special characters in path
-        path = path:gsub(" ", "%%20")
-        if not path:match("^/") then
-            path = "/" .. path
-        end
-
-        -- Establish TCP connection
-        local tcp = socket.tcp()
-        open_client = tcp
-        local conn_ok, conn_err = poll_connect(tcp, host, port, poll_opts)
-
-        if not conn_ok then
-            tcp:close()
-            open_client = nil
-            if conn_err == "aborted" then
+        if not hop_ok then
+            if res == "aborted" then
                 return finish(KIND.ABORTED)
             end
-            -- Transparent HTTP -> HTTPS fallback
-            if not attempted_protocol_fallback and scheme == "http" then
-                attempted_protocol_fallback = true
-                current_url = current_url:gsub("^http://", "https://")
-                logger.warn("DownloadEngine: HTTP connect failed. Retrying HTTPS: " .. current_url)
-                visited_urls = {}
-                -- Loop to retry with HTTPS
+            local stage, detail = res.stage, res.detail
+            if stage == "url" then
+                return finish(KIND.FAILED, nil, nil, _("Invalid URL: ") .. tostring(detail))
+            elseif stage == "connect" then
+                -- Transparent HTTP -> HTTPS fallback (connect failures only)
+                if not attempted_protocol_fallback and current_url:match("^http://") then
+                    attempted_protocol_fallback = true
+                    current_url = current_url:gsub("^http://", "https://")
+                    logger.warn("DownloadEngine: HTTP connect failed. Retrying HTTPS: " .. current_url)
+                    visited_urls = {}
+                else
+                    return finish(KIND.FAILED, nil, nil,
+                        T(_("Connection failed to %1:%2 (%3)"), res.host, res.port, tostring(detail)))
+                end
+            elseif stage == "ssl_unavailable" then
+                return finish(KIND.FAILED, nil, nil, _("HTTPS requested but ") .. tostring(detail))
+            elseif stage == "ssl_wrap" then
+                return finish(KIND.FAILED, nil, nil, _("SSL wrap failed: ") .. tostring(detail))
+            elseif stage == "ssl_handshake" then
+                return finish(KIND.FAILED, nil, nil, _("SSL handshake failed: ") .. tostring(detail))
+            elseif stage == "send" then
+                return finish(KIND.FAILED, nil, nil, _("Failed to send request: ") .. tostring(detail))
+            elseif stage == "status" then
+                return finish(KIND.FAILED, nil, nil, _("Server closed connection without response: ") .. tostring(detail))
+            elseif stage == "malformed_status" then
+                return finish(KIND.FAILED, nil, nil, _("Malformed HTTP status line: ") .. tostring(detail))
             else
-                return finish(KIND.FAILED, nil, nil, T(_("Connection failed to %1:%2 (%3)"), host, port, tostring(conn_err)))
+                return finish(KIND.FAILED, nil, nil, tostring(detail))
             end
         else
-            local client = tcp
-            -- Wrap TLS if HTTPS
-            if scheme == "https" then
-                if not ssl then
-                    return finish(KIND.FAILED, nil, nil, _("HTTPS requested but LuaSec SSL library is unavailable"))
-                end
-                local ssl_params = {
-                    mode = "client",
-                    protocol = "any",
-                    verify = "none",
-                    options = "all",
-                }
-                local ssl_sock, ssl_err = ssl.wrap(tcp, ssl_params)
-                if not ssl_sock then
-                    return finish(KIND.FAILED, nil, nil, _("SSL wrap failed: ") .. tostring(ssl_err))
-                end
-                local handshake_ok, handshake_err = poll_handshake(ssl_sock, poll_opts)
-                if not handshake_ok then
-                    open_client = ssl_sock
-                    if handshake_err == "aborted" then
-                        return finish(KIND.ABORTED)
-                    end
-                    return finish(KIND.FAILED, nil, nil, _("SSL handshake failed: ") .. tostring(handshake_err))
-                end
-                client = ssl_sock
-                open_client = client
-            end
-
-            -- Send HTTP GET Request
-            local host_header = host
-            if (scheme == "http" and port ~= 80) or (scheme == "https" and port ~= 443) then
-                host_header = host .. ":" .. port
-            end
-
-            local model_name = "KOReader"
-            if ok_dev and Device and Device.getModel then
-                pcall(function() model_name = Device:getModel() end)
-            end
-
-            local request_str = string.format(
-                "GET %s HTTP/1.1\r\n" ..
-                "Host: %s\r\n" ..
-                "User-Agent: KOReader lanfetch/%s (%s)\r\n" ..
-                "Accept: */*\r\n" ..
-                "Connection: close\r\n\r\n",
-                path,
-                host_header,
-                "1.0",
-                tostring(model_name)
-            )
-
-            local send_ok, send_err = poll_send(client, request_str, poll_opts)
-            if not send_ok then
-                if send_err == "aborted" then
-                    return finish(KIND.ABORTED)
-                end
-                return finish(KIND.FAILED, nil, nil, _("Failed to send request: ") .. tostring(send_err))
-            end
-
-            -- Read HTTP Status Line
-            local status_line, status_err = poll_receive_line(client, poll_opts)
-            if not status_line then
-                if status_err == "aborted" then
-                    return finish(KIND.ABORTED)
-                end
-                return finish(KIND.FAILED, nil, nil, _("Server closed connection without response: ") .. tostring(status_err))
-            end
-
-            status_line = status_line:gsub("[\r\n]+$", "")
-            local http_ver, status_code_str, status_msg = status_line:match("^(HTTP/[%d%.]+)%s+(%d+)%s*(.*)$")
-            local code = tonumber(status_code_str)
-            if not code then
-                return finish(KIND.FAILED, nil, nil, _("Malformed HTTP status line: ") .. tostring(status_line))
-            end
-
-            -- Read HTTP Response Headers
-            local headers = {}
-            while true do
-                local header_line, h_err = poll_receive_line(client, poll_opts)
-                if not header_line then
-                    if h_err == "aborted" then
-                        return finish(KIND.ABORTED)
-                    end
-                    break
-                end
-                header_line = header_line:gsub("[\r\n]+$", "")
-                if header_line == "" then break end
-                local k, v = header_line:match("^([^:]+):%s*(.*)$")
-                if k and v then
-                    headers[k:lower()] = v:gsub("%s+$", "")
-                end
-            end
+            local client = res.client
+            open_client = client
+            local code = res.code
+            local headers = res.headers
 
             logger.dbg(string.format("DownloadEngine: Response %d for %s", code, current_url))
 
@@ -616,7 +363,7 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                         return finish(KIND.ABORTED)
                     end
 
-                    local data, stream_err = poll_receive_chunk(client, 8192, poll_opts)
+                    local data, stream_err = http_hop.poll_receive_chunk(client, 8192, hop_opts)
                     if data then
                         if #data > 0 then
                             file_handle:write(data)
@@ -633,7 +380,7 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                             end
                         end
                         -- Pump the event loop per chunk even when data flows fast
-                        -- enough that no poll timeout fired inside the helper.
+                        -- enough that no poll timeout fired inside the hop.
                         if yield_callback then
                             yield_callback()
                         end
@@ -688,7 +435,7 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                 return finish(KIND.COMPLETED, final_path, metadata)
 
             -- Step C: Handle HTTP 400 fallback or errors
-            elseif code == 400 and not attempted_protocol_fallback and scheme == "http" then
+            elseif code == 400 and not attempted_protocol_fallback and res.scheme == "http" then
                 client:close()
                 open_client = nil
                 attempted_protocol_fallback = true
@@ -697,7 +444,7 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                 visited_urls = {}
 
             else
-                return finish(KIND.FAILED, nil, nil, T(_("Server returned HTTP %1 (%2)"), code, tostring(status_msg or "")))
+                return finish(KIND.FAILED, nil, nil, T(_("Server returned HTTP %1 (%2)"), code, tostring(res.status_msg or "")))
             end
         end
     end
