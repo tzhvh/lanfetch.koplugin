@@ -26,3 +26,9 @@ luacov.report.out
 .env
 .env.*
 *.local
+AGENTS.md
+CONTEXT.md
+skills-lock.json
+.agents/
+.scratch/
+docs/
