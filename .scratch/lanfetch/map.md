@@ -12,7 +12,7 @@ Complete architecture and technical specification for the KOReader LAN PDF Downl
   - Android compatibility verified across all networking and storage paths.
   - Strict ephemeral state for URLs/octets to minimize e-reader flash I/O.
   - High-contrast e-ink rendering with partial screen dirty rects.
-  - Direct streaming to disk (`ltn12.sink.file`) with redirect following and `Content-Disposition` header parsing.
+  - Direct streaming to disk (8 KB chunks over the yieldable `http_hop` transport) with redirect following and `Content-Disposition` header parsing; the attempt lifecycle is governed by the `DownloadSession` state machine (ADR-0001).
 
 ## Decisions so far
 
@@ -23,7 +23,7 @@ Complete architecture and technical specification for the KOReader LAN PDF Downl
 - [Octet Tabber State Machine & E-Ink Selection Control](issues/02-octet-tabber-state-machine.md) — Discrete token state machine enables Tab cycling, digit overwrite on whole selection, arrow deselection, and backspace substring wipe with high-contrast e-ink partial redraws.
 - [Dual-Mode Keyboard Coexistence & Alphanumeric Handoff](issues/03-dual-mode-keyboard-coexistence.md) — Bidirectional URL parser enables seamless handoff between the custom full-screen LAN keypad and KOReader's native InputDialog/virtual keyboard.
 - [Hierarchical Folder Presets & Tag Switcher](issues/04-hierarchical-folder-presets.md) — Persistent base directory plus hierarchical subfolder presets rendered as a high-contrast tag ribbon with recursive on-demand directory creation.
-- [Resilient Download Pipeline & Protocol Fallbacks](issues/05-resilient-download-pipeline.md) — Non-blocking streaming pipeline with 10-hop redirect handling, transparent HTTP/HTTPS fallback, RFC 5987 Content-Disposition parsing, and atomic direct-to-disk .tmp streaming.
+- [Resilient Download Pipeline & Protocol Fallbacks](issues/05-resilient-download-pipeline.md) — Yieldable `http_hop` transport (poll-loop connect/TLS/reads, abort before every yield) under a `DownloadSession` state machine: 10-hop redirect handling, transparent HTTP/HTTPS fallback, RFC 5987 parsing, typed terminal outcomes, atomic direct-to-disk .tmp streaming, and CANCEL that lands in every phase (ADR-0001).
 - [Onboarding Flow & Ephemeral State Lifecycle](issues/06-onboarding-and-ephemeral-lifecycle.md) — 2-step first-run wizard, strict in-memory RAM URL state with zero flash wear, and post-download reader invocation.
 
 ## Not yet specified

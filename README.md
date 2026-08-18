@@ -79,7 +79,9 @@ lanfetch.koplugin/
 ├── _meta.lua               # Plugin metadata, category, version, and gettext descriptions
 ├── main.lua                # WidgetContainer entry point, settings persistence, menus, Dispatcher actions
 ├── ui_dialog.lua           # Native modal window, scrolling tag ribbon, 4x4 keypad, and system keyboard handoff
-├── download_engine.lua     # Resilient socket engine, redirect loop, RFC 5987 parser, and streaming sink
+├── download_session.lua    # Download lifecycle state machine at the dialog↔engine seam (ADR-0001)
+├── download_engine.lua     # Redirect policy, protocol fallback, RFC 5987 parser, streaming finalization, terminal outcome funnel
+├── http_hop.lua            # Yieldable single HTTP GET hop: poll-loop connect/TLS/send/reads shared by probe and download
 ├── octet_tabber.lua        # Discrete token state machine for IPv4 octet tabbing and selection overwrite
 ├── subnet_probe.lua        # Zero-packet UDP dummy socket routing detector & CIDR netmask calculator
 ├── folder_manager.lua      # Hierarchical preset manager & util.makePath integration
