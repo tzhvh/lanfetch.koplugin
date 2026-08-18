@@ -66,6 +66,10 @@ _Avoid_: HEAD check, pre-fetch, preliminary scan
 The custom streaming socket layer capable of gracefully handling non-standard HTTP 1.0 redirect headers (such as bogus Content-Length on 302 responses) and auto-encoding raw whitespace in redirect paths.
 _Avoid_: Custom http, raw socket fetcher, socket hack
 
+**Yieldable Socket Transport**:
+The poll-loop socket primitive beneath the Resilient Socket Transport that retries every blocking operation (connect, TLS handshake, send, reads) at short intervals, checking the abort signal before each yield so the event loop keeps pumping and cancellation stays live.
+_Avoid_: Async sockets, non-blocking layer, evented transport
+
 **Tag Ribbon Paging**:
 The sliding window mechanism presenting navigation arrows (◀ / ▶) across subfolder presets when tag count exceeds the physical display width.
 _Avoid_: Tag scroller, folder carousel, chip paginator

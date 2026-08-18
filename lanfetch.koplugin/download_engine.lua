@@ -3,6 +3,10 @@ DownloadEngine: Resilient HTTP/HTTPS streaming download engine for KOReader.
 Handles non-standard LAN HTTP servers (e.g. ShareViaHttp, Python http.server, Calibre),
 RFC 5987 Content-Disposition parsing, unencoded redirect paths with spaces,
 pre-download filename derivation from redirects, and atomic direct-to-disk streaming without memory buffering.
+All socket operations run through a yieldable poll transport (poll_connect, poll_handshake,
+poll_send, poll_receive_line, poll_receive_chunk): short per-socket timeouts with
+abort-check-then-yield loops, so cancellation lands within one poll interval even
+during connect or TLS handshake, and the KOReader event loop keeps pumping.
 --]]--
 
 local socket = require("socket")
@@ -52,6 +56,126 @@ DownloadEngine.KIND = {
     ABORTED = "aborted",
     FAILED = "failed",
 }
+
+--- Poll interval for the yieldable transport: every blocking socket operation is
+--- retried at this granularity, and the abort checker runs before each yield, so
+--- a CANCEL lands within one interval even during connect or TLS handshake.
+local POLL_INTERVAL = 0.2
+
+local function poll_aborted(opts)
+    return opts.abort_checker and opts.abort_checker()
+end
+
+--- Yieldable connect: retries the same socket (verified on Linux/LuaSocket — a
+--- timed-out connect leaves the socket reusable) until connected, refused, aborted,
+--- or the wall-clock cap expires. Aborts are checked before yielding.
+local function poll_connect(sock, host, port, opts)
+    local deadline = socket.gettime() + (opts.connect_timeout or DownloadEngine.CONNECT_TIMEOUT)
+    sock:settimeout(POLL_INTERVAL)
+    while true do
+        local ok, err = sock:connect(host, port)
+        if ok then
+            return true
+        elseif err == "timeout" then
+            if poll_aborted(opts) then return nil, "aborted" end
+            if socket.gettime() >= deadline then return nil, "timeout" end
+            if opts.yield_callback then opts.yield_callback() end
+        else
+            return nil, err
+        end
+    end
+end
+
+--- Yieldable TLS handshake: LuaSec surfaces "want read"/"want write" while the
+--- handshake is in flight; poll those with abort checks and yields.
+local function poll_handshake(sock, opts)
+    local deadline = socket.gettime() + (opts.connect_timeout or DownloadEngine.CONNECT_TIMEOUT)
+    sock:settimeout(POLL_INTERVAL)
+    while true do
+        local ok, err = sock:dohandshake()
+        if ok then
+            return true
+        elseif err == "want read" or err == "want write" or err == "timeout" then
+            if poll_aborted(opts) then return nil, "aborted" end
+            if socket.gettime() >= deadline then return nil, "timeout" end
+            if opts.yield_callback then opts.yield_callback() end
+        else
+            return nil, err
+        end
+    end
+end
+
+--- Yieldable send: resumes from the last byte index on partial sends.
+local function poll_send(sock, data, opts)
+    local deadline = socket.gettime() + (opts.write_timeout or DownloadEngine.READ_TIMEOUT)
+    sock:settimeout(POLL_INTERVAL)
+    local next_idx = 1
+    while true do
+        local last, err, partial_last = sock:send(data, next_idx)
+        if last then
+            if last >= #data then return true end
+            next_idx = last + 1
+        elseif err == "timeout" then
+            if partial_last and partial_last >= next_idx then next_idx = partial_last + 1 end
+            if poll_aborted(opts) then return nil, "aborted" end
+            if socket.gettime() >= deadline then return nil, "timeout" end
+            if opts.yield_callback then opts.yield_callback() end
+        else
+            return nil, err
+        end
+    end
+end
+
+--- Yieldable line receive. On timeout, receive("*l") drains its buffer into the
+--- partial return, so fragments are accumulated until the newline arrives.
+--- Returns line, nil on success; nil, err on failure ("closed" may still deliver
+--- a final unterminated line as the first return).
+local function poll_receive_line(sock, opts)
+    local deadline = socket.gettime() + (opts.read_timeout or DownloadEngine.READ_TIMEOUT)
+    sock:settimeout(POLL_INTERVAL)
+    local acc = nil
+    while true do
+        local line, err, partial = sock:receive("*l")
+        if line then
+            return acc and (acc .. line) or line
+        end
+        if partial and #partial > 0 then
+            acc = acc and (acc .. partial) or partial
+        end
+        if err == "timeout" then
+            if poll_aborted(opts) then return nil, "aborted" end
+            if socket.gettime() >= deadline then return nil, "timeout" end
+            if opts.yield_callback then opts.yield_callback() end
+        elseif err == "closed" then
+            return acc, "closed"
+        else
+            return nil, err
+        end
+    end
+end
+
+--- Yieldable chunk receive. Returns data (possibly ""), nil+err otherwise
+--- ("closed" = EOF, "aborted", or a transport error).
+local function poll_receive_chunk(sock, size, opts)
+    local deadline = socket.gettime() + (opts.read_timeout or DownloadEngine.READ_TIMEOUT)
+    sock:settimeout(POLL_INTERVAL)
+    while true do
+        local chunk, err, partial = sock:receive(size)
+        if chunk then
+            return chunk
+        end
+        if partial and #partial > 0 then
+            return partial
+        end
+        if err == "timeout" then
+            if poll_aborted(opts) then return nil, "aborted" end
+            if socket.gettime() >= deadline then return nil, "timeout" end
+            if opts.yield_callback then opts.yield_callback() end
+        else
+            return nil, err
+        end
+    end
+end
 
 --- Parse Content-Disposition header conforming to RFC 6266 & RFC 5987
 function DownloadEngine.parseContentDisposition(header_val)
@@ -160,9 +284,20 @@ function DownloadEngine.getUniqueFilename(target_dir, base_name)
     end
 end
 
---- Lightweight pre-flight probe: Follows redirects to derive filename and file size before download prompt
-function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec)
+--- Lightweight pre-flight probe: Follows redirects to derive filename and file size
+--- before download prompt. Yieldable and cancellable per operation: abort_checker is
+--- polled before every yield, so CANCEL lands mid-connect, not just between hops.
+--- Returns (name_or_nil, final_url, size_or_nil, headers_or_nil); network failures
+--- never throw, they degrade to nil results for the caller to soft-handle.
+function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec, abort_checker, yield_callback)
     timeout_sec = timeout_sec or 5
+    local poll_opts = {
+        abort_checker = abort_checker,
+        yield_callback = yield_callback,
+        connect_timeout = timeout_sec,
+        read_timeout = timeout_sec,
+        write_timeout = timeout_sec,
+    }
     local current_url = initial_url
     local redirect_count = 0
     local visited_urls = {}
@@ -184,9 +319,8 @@ function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec)
         if not path:match("^/") then path = "/" .. path end
 
         local tcp = socket.tcp()
-        tcp:settimeout(timeout_sec)
-        local ok, err = tcp:connect(host, port)
-        if not ok then
+        local conn_ok = poll_connect(tcp, host, port, poll_opts)
+        if not conn_ok then
             tcp:close()
             break
         end
@@ -196,17 +330,18 @@ function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec)
             if not ssl then tcp:close(); break end
             local ssl_sock = ssl.wrap(tcp, { mode = "client", protocol = "any", verify = "none", options = "all" })
             if not ssl_sock then tcp:close(); break end
-            if not ssl_sock:dohandshake() then ssl_sock:close(); break end
+            if not poll_handshake(ssl_sock, poll_opts) then ssl_sock:close(); break end
             client = ssl_sock
         end
 
-        client:settimeout(timeout_sec)
-
         local host_header = (port == 80 or port == 443) and host or string.format("%s:%d", host, port)
         local req = string.format("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: KOReader/Downloader\r\nAccept: */*\r\nConnection: close\r\n\r\n", path, host_header)
-        client:send(req)
+        if not poll_send(client, req, poll_opts) then
+            client:close()
+            break
+        end
 
-        local status_line = client:receive("*l")
+        local status_line = poll_receive_line(client, poll_opts)
         if not status_line then
             client:close()
             break
@@ -218,7 +353,7 @@ function DownloadEngine.probeRemoteMetadata(initial_url, timeout_sec)
 
         local headers = {}
         while true do
-            local line = client:receive("*l")
+            local line = poll_receive_line(client, poll_opts)
             if not line then break end
             line = line:gsub("[\r\n]+$", "")
             if line == "" then break end
@@ -262,6 +397,10 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
     local redirect_count = 0
     local visited_urls = {}
     local attempted_protocol_fallback = false
+    local poll_opts = {
+        abort_checker = abort_checker,
+        yield_callback = yield_callback,
+    }
 
     -- Terminal funnel: the single exit path from this function. Closes the live
     -- socket and removes the partial temp file unless the download completed.
@@ -315,13 +454,15 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
 
         -- Establish TCP connection
         local tcp = socket.tcp()
-        tcp:settimeout(DownloadEngine.CONNECT_TIMEOUT)
         open_client = tcp
-        local conn_ok, conn_err = tcp:connect(host, port)
+        local conn_ok, conn_err = poll_connect(tcp, host, port, poll_opts)
 
         if not conn_ok then
             tcp:close()
             open_client = nil
+            if conn_err == "aborted" then
+                return finish(KIND.ABORTED)
+            end
             -- Transparent HTTP -> HTTPS fallback
             if not attempted_protocol_fallback and scheme == "http" then
                 attempted_protocol_fallback = true
@@ -349,16 +490,17 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                 if not ssl_sock then
                     return finish(KIND.FAILED, nil, nil, _("SSL wrap failed: ") .. tostring(ssl_err))
                 end
-                local handshake_ok, handshake_err = ssl_sock:dohandshake()
+                local handshake_ok, handshake_err = poll_handshake(ssl_sock, poll_opts)
                 if not handshake_ok then
                     open_client = ssl_sock
+                    if handshake_err == "aborted" then
+                        return finish(KIND.ABORTED)
+                    end
                     return finish(KIND.FAILED, nil, nil, _("SSL handshake failed: ") .. tostring(handshake_err))
                 end
                 client = ssl_sock
                 open_client = client
             end
-
-            client:settimeout(DownloadEngine.READ_TIMEOUT)
 
             -- Send HTTP GET Request
             local host_header = host
@@ -383,14 +525,20 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                 tostring(model_name)
             )
 
-            local send_ok, send_err = client:send(request_str)
+            local send_ok, send_err = poll_send(client, request_str, poll_opts)
             if not send_ok then
+                if send_err == "aborted" then
+                    return finish(KIND.ABORTED)
+                end
                 return finish(KIND.FAILED, nil, nil, _("Failed to send request: ") .. tostring(send_err))
             end
 
             -- Read HTTP Status Line
-            local status_line, status_err = client:receive("*l")
+            local status_line, status_err = poll_receive_line(client, poll_opts)
             if not status_line then
+                if status_err == "aborted" then
+                    return finish(KIND.ABORTED)
+                end
                 return finish(KIND.FAILED, nil, nil, _("Server closed connection without response: ") .. tostring(status_err))
             end
 
@@ -404,8 +552,13 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
             -- Read HTTP Response Headers
             local headers = {}
             while true do
-                local header_line, h_err = client:receive("*l")
-                if not header_line then break end
+                local header_line, h_err = poll_receive_line(client, poll_opts)
+                if not header_line then
+                    if h_err == "aborted" then
+                        return finish(KIND.ABORTED)
+                    end
+                    break
+                end
                 header_line = header_line:gsub("[\r\n]+$", "")
                 if header_line == "" then break end
                 local k, v = header_line:match("^([^:]+):%s*(.*)$")
@@ -448,29 +601,33 @@ function DownloadEngine.download(initial_url, target_directory, options, progres
                         return finish(KIND.ABORTED)
                     end
 
-                    local chunk, stream_err, partial = client:receive(8192)
-                    local data = chunk or partial
-                    if data and #data > 0 then
-                        file_handle:write(data)
-                        bytes_received = bytes_received + #data
-                        if progress_callback then
-                            local elapsed = math.max(0.001, socket.gettime() - download_start_time)
-                            local speed_bps = bytes_received / elapsed
-                            local percentage = (total_expected_bytes > 0) and ((bytes_received / total_expected_bytes) * 100) or 0
-                            local cont = progress_callback(bytes_received, total_expected_bytes, percentage, speed_bps)
-                            if cont == false then
-                                file_handle:close()
-                                return finish(KIND.ABORTED)
+                    local data, stream_err = poll_receive_chunk(client, 8192, poll_opts)
+                    if data then
+                        if #data > 0 then
+                            file_handle:write(data)
+                            bytes_received = bytes_received + #data
+                            if progress_callback then
+                                local elapsed = math.max(0.001, socket.gettime() - download_start_time)
+                                local speed_bps = bytes_received / elapsed
+                                local percentage = (total_expected_bytes > 0) and ((bytes_received / total_expected_bytes) * 100) or 0
+                                local cont = progress_callback(bytes_received, total_expected_bytes, percentage, speed_bps)
+                                if cont == false then
+                                    file_handle:close()
+                                    return finish(KIND.ABORTED)
+                                end
                             end
                         end
+                        -- Pump the event loop per chunk even when data flows fast
+                        -- enough that no poll timeout fired inside the helper.
                         if yield_callback then
                             yield_callback()
                         end
-                    end
-
-                    if stream_err == "closed" then
+                    elseif stream_err == "closed" then
                         break
-                    elseif stream_err then
+                    elseif stream_err == "aborted" then
+                        file_handle:close()
+                        return finish(KIND.ABORTED)
+                    else
                         file_handle:close()
                         return finish(KIND.FAILED, nil, nil, T(_("Download interrupted (%1)"), tostring(stream_err)))
                     end
