@@ -42,6 +42,10 @@ _Avoid_: IP detector, interface scraper, subnet scanner
 The streaming network transfer engine that negotiates HTTP/HTTPS protocols, follows redirects, extracts filenames from Content-Disposition headers, and writes data directly to storage.
 _Avoid_: Fetcher, file downloader, transfer client
 
+**DownloadSession**:
+The state machine governing one download attempt from start to terminal outcome (completed, failed, aborted, or closed), owning transition legality, the single cancel path, retry, and teardown at the seam between the dialog and the Download Pipeline.
+_Avoid_: Download manager, transfer controller, download controller
+
 **Filename Resolver**:
 The multi-tier algorithm that extracts a suggested filename from the URL path, decodes RFC 5987 Content-Disposition headers, or prompts the user with a fallback name.
 _Avoid_: Name parser, title extractor

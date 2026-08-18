@@ -32,6 +32,8 @@ local OctetTabber = require("octet_tabber")
 local SubnetProbe = require("subnet_probe")
 local URLHandoff = require("url_handoff")
 local DownloadEngine = require("download_engine")
+local DownloadSession = require("download_session")
+local SESSION_STATE = DownloadSession.STATE
 
 local LanFetchDialog = InputContainer:extend{
     name = "lanfetch_dialog",
@@ -39,7 +41,6 @@ local LanFetchDialog = InputContainer:extend{
 
 function LanFetchDialog:init()
     self.tabber = OctetTabber.new(nil, self.default_port or 9999, "")
-    self.abort_requested = false
     self.tag_scroll_offset = 1
 
     if Device:hasKeys() then
@@ -512,86 +513,136 @@ function LanFetchDialog:switchToAlphanumericMode()
 end
 
 function LanFetchDialog:promptAndDownload()
-    local target_url = self.tabber:getURL()
-    self:startDownloadURL(target_url)
+    self:startDownloadURL(self.tabber:getURL())
 end
 
 function LanFetchDialog:startDownloadURL(target_url)
     local target_dir = self.folder_manager:getTargetPath()
     self.folder_manager:ensureTargetDirectoryExists()
+    self:ensureSession():start(target_url, target_dir)
+end
 
-    local initial_candidate = DownloadEngine.extractFilenameFromUrl(target_url)
+--- The UI side of the DownloadSession seam: dialogs open and close purely in
+--- response to session state; the session owns legality, cancellation, retry,
+--- and teardown.
+function LanFetchDialog:ensureSession()
+    if not self.download_session then
+        self.download_session = DownloadSession.new{
+            engine = DownloadEngine,
+            schedule = function(fn) UIManager:nextTick(fn) end,
+            on_state = function(state, payload)
+                self:onDownloadState(state, payload)
+            end,
+            on_progress = function(bytes, total, pct, speed)
+                self:onDownloadProgress(bytes, total, pct, speed)
+            end,
+        }
+    end
+    return self.download_session
+end
 
-    -- If no explicit filename in URL path, probe server redirects and headers
-    if not initial_candidate or initial_candidate == "" then
-        local probe_dialog = InfoMessage:new{
+function LanFetchDialog:onDownloadState(state, payload)
+    if state == SESSION_STATE.PROBING then
+        self.probe_dialog = InfoMessage:new{
             text = _("Querying server for filename..."),
             dismissable = false,
         }
-        UIManager:show(probe_dialog)
+        UIManager:show(self.probe_dialog)
 
-        UIManager:nextTick(function()
-            local probed_name, final_url, expected_size = DownloadEngine.probeRemoteMetadata(target_url, 4)
-            UIManager:close(probe_dialog)
-
-            local candidate_name = probed_name or "download.pdf"
-            candidate_name = DownloadEngine.sanitizeFilename(candidate_name)
-
-            local desc_text = T(_("Saving to:\n%1"), target_dir)
-            if expected_size and expected_size > 0 then
-                desc_text = desc_text .. string.format("\nFile size: %.1f KB", expected_size / 1024)
-            end
-
-            local confirm_dialog
-            confirm_dialog = InputDialog:new{
-                title = _("Confirm Download"),
-                input = candidate_name,
-                description = desc_text,
-                buttons = {
-                    {
-                        { text = _("Cancel"), callback = function() UIManager:close(confirm_dialog) end },
-                        { text = _("Download"), callback = function()
-                            local custom_name = confirm_dialog:getInputText()
-                            custom_name = DownloadEngine.sanitizeFilename(custom_name)
-                            UIManager:close(confirm_dialog)
-                            self:executeDownload(final_url or target_url, target_dir, custom_name)
-                        end },
-                    }
-                }
-            }
-            UIManager:show(confirm_dialog)
-        end)
-    else
-        local candidate_name = DownloadEngine.sanitizeFilename(initial_candidate)
-        local confirm_dialog
-        confirm_dialog = InputDialog:new{
+    elseif state == SESSION_STATE.CONFIRMING then
+        if self.probe_dialog then
+            UIManager:close(self.probe_dialog)
+            self.probe_dialog = nil
+        end
+        local desc_text = T(_("Saving to:\n%1"), payload.target_dir)
+        if payload.size and payload.size > 0 then
+            desc_text = desc_text .. string.format("\nFile size: %.1f KB", payload.size / 1024)
+        end
+        local dialog
+        dialog = InputDialog:new{
             title = _("Confirm Download"),
-            input = candidate_name,
-            description = T(_("Saving to:\n%1"), target_dir),
+            input = payload.suggested_name,
+            description = desc_text,
             buttons = {
                 {
-                    { text = _("Cancel"), callback = function() UIManager:close(confirm_dialog) end },
+                    { text = _("Cancel"), callback = function()
+                        UIManager:close(dialog)
+                        self.download_session:cancel()
+                    end },
                     { text = _("Download"), callback = function()
-                        local custom_name = confirm_dialog:getInputText()
-                        custom_name = DownloadEngine.sanitizeFilename(custom_name)
-                        UIManager:close(confirm_dialog)
-                        self:executeDownload(target_url, target_dir, custom_name)
+                        local name = dialog:getInputText()
+                        UIManager:close(dialog)
+                        self.download_session:confirm(name)
                     end },
                 }
             }
         }
-        UIManager:show(confirm_dialog)
+        self.confirm_dialog = dialog
+        UIManager:show(dialog)
+
+    elseif state == SESSION_STATE.DOWNLOADING then
+        if self.probe_dialog then
+            UIManager:close(self.probe_dialog)
+            self.probe_dialog = nil
+        end
+        self:showProgressDialog(payload.filename)
+
+    elseif state == SESSION_STATE.CANCELING then
+        if self.progress_stats and self.progress_dialog then
+            self.progress_stats:setText(_("Canceling download..."))
+            UIManager:setDirty(self.progress_dialog, "ui")
+        end
+
+    elseif state == SESSION_STATE.COMPLETED then
+        self:closeProgressDialog()
+        if self.plugin and self.plugin.refreshFileManager then
+            self.plugin:refreshFileManager(self.folder_manager:getTargetPath())
+        end
+        UIManager:show(ConfirmBox:new{
+            text = T(_("Download Complete!\n\nSaved: %1\nSize: %2 MB"),
+                payload.path, string.format("%.2f", (payload.meta and payload.meta.size or 0) / (1024 * 1024))),
+            ok_text = _("📖 Open PDF"),
+            cancel_text = _("Stay Here"),
+            ok_callback = function()
+                self:onClose()
+                local ReaderUI = require("apps/reader/readerui")
+                ReaderUI:showReader(payload.path)
+            end,
+        })
+
+    elseif state == SESSION_STATE.FAILED then
+        self:closeProgressDialog()
+        UIManager:show(ConfirmBox:new{
+            text = T(_("Download Error:\n%1"), tostring(payload.error)),
+            ok_text = _("Retry"),
+            cancel_text = _("Close"),
+            ok_callback = function()
+                self.download_session:retry()
+            end,
+        })
+
+    elseif state == SESSION_STATE.ABORTED then
+        self:closeProgressDialog()
+        UIManager:show(Notification:new{
+            text = _("Download canceled."),
+            timeout = 2,
+        })
+
+    elseif state == SESSION_STATE.CLOSED then
+        self:closeProgressDialog()
+        if self.probe_dialog then
+            UIManager:close(self.probe_dialog)
+            self.probe_dialog = nil
+        end
     end
 end
 
-function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
-    self.abort_requested = false
-
+function LanFetchDialog:showProgressDialog(filename)
     local title_face = Font:getFace("cfont", 18)
     local stats_face = Font:getFace("cfont", 14)
 
     local title_widget = TextWidget:new{
-        text = T(_("Downloading: %1"), custom_filename or "document.pdf"),
+        text = T(_("Downloading: %1"), filename or "document.pdf"),
         face = title_face,
         bold = true,
     }
@@ -615,9 +666,7 @@ function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
         margin = 4,
         background = Blitbuffer.COLOR_WHITE,
         callback = function()
-            self.abort_requested = true
-            stats_widget:setText(_("Canceling download..."))
-            UIManager:setDirty(self, "ui")
+            self.download_session:cancel()
         end,
     }
 
@@ -641,7 +690,7 @@ function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
         progress_group,
     }
 
-    local progress_dialog = InputContainer:new{
+    self.progress_dialog = InputContainer:new{
         CenterContainer:new{
             dimen = Screen:getSize(),
             MovableContainer:new{
@@ -649,114 +698,51 @@ function LanFetchDialog:executeDownload(url, target_dir, custom_filename)
             }
         }
     }
+    self.progress_bar = progress_bar
+    self.progress_stats = stats_widget
+    UIManager:show(self.progress_dialog)
+end
 
-    UIManager:show(progress_dialog)
-
-    local last_ui_time = 0
-    local progress_cb = function(received, total, percentage, speed_bps)
-        if self.abort_requested then return false end
-        local now = socket.gettime()
-        if now - last_ui_time >= 0.12 or (total > 0 and received >= total) then
-            last_ui_time = now
-            local rec_str = (received >= 1024*1024)
-                and string.format("%.2f MB", received / (1024 * 1024))
-                or string.format("%.1f KB", received / 1024)
-            local speed_str = (speed_bps >= 1024*1024)
-                and string.format("%.2f MB/s", speed_bps / (1024 * 1024))
-                or string.format("%.1f KB/s", speed_bps / 1024)
-
-            if total and total > 0 then
-                local tot_str = string.format("%.2f MB", total / (1024 * 1024))
-                local pct_int = math.min(100, math.floor(percentage))
-                stats_widget:setText(string.format("%s / %s (%d%%) • %s", rec_str, tot_str, pct_int, speed_str))
-                progress_bar.percentage = math.min(1.0, received / total)
-            else
-                stats_widget:setText(string.format("%s • %s", rec_str, speed_str))
-            end
-            UIManager:setDirty(progress_dialog, "ui")
-        end
-        return true
+function LanFetchDialog:closeProgressDialog()
+    if self.progress_dialog then
+        UIManager:close(self.progress_dialog)
+        self.progress_dialog = nil
+        self.progress_bar = nil
+        self.progress_stats = nil
     end
+end
 
-    local abort_cb = function()
-        return self.abort_requested
+function LanFetchDialog:onDownloadProgress(received, total, percentage, speed_bps)
+    if not self.progress_dialog or not self.progress_stats then return end
+
+    local now = socket.gettime()
+    if now - (self._last_progress_ui or 0) < 0.12 and not (total > 0 and received >= total) then
+        return
     end
+    self._last_progress_ui = now
 
-    local yield_cb = function()
-        coroutine.yield()
+    local rec_str = (received >= 1024*1024)
+        and string.format("%.2f MB", received / (1024 * 1024))
+        or string.format("%.1f KB", received / 1024)
+    local speed_str = (speed_bps >= 1024*1024)
+        and string.format("%.2f MB/s", speed_bps / (1024 * 1024))
+        or string.format("%.1f KB/s", speed_bps / 1024)
+
+    if total and total > 0 then
+        local tot_str = string.format("%.2f MB", total / (1024 * 1024))
+        local pct_int = math.min(100, math.floor(percentage))
+        self.progress_stats:setText(string.format("%s / %s (%d%%) • %s", rec_str, tot_str, pct_int, speed_str))
+        self.progress_bar.percentage = math.min(1.0, received / total)
+    else
+        self.progress_stats:setText(string.format("%s • %s", rec_str, speed_str))
     end
-
-    local download_co = coroutine.create(function()
-        return DownloadEngine.download(
-            url,
-            target_dir,
-            { custom_filename = custom_filename, overwrite = false },
-            progress_cb,
-            abort_cb,
-            yield_cb
-        )
-    end)
-
-    local function stepDownload()
-        if coroutine.status(download_co) == "suspended" then
-            local ok, outcome = coroutine.resume(download_co)
-            if not ok then
-                -- Runtime error inside the engine: normalize into a failed outcome
-                outcome = {
-                    kind = DownloadEngine.KIND.FAILED,
-                    path = nil,
-                    meta = {},
-                    error = tostring(outcome),
-                }
-            end
-
-            if coroutine.status(download_co) == "suspended" then
-                -- Yielded between chunk reads: allow event loop to process touch events and repaint
-                UIManager:nextTick(stepDownload)
-            else
-                -- Coroutine completed!
-                local KIND = DownloadEngine.KIND
-                UIManager:close(progress_dialog)
-
-                if outcome.kind == KIND.COMPLETED then
-                    if self.plugin and self.plugin.refreshFileManager then
-                        self.plugin:refreshFileManager(target_dir)
-                    end
-
-                    UIManager:show(ConfirmBox:new{
-                        text = T(_("Download Complete!\n\nSaved: %1\nSize: %2 MB"),
-                            outcome.path, string.format("%.2f", (outcome.meta.size or 0) / (1024 * 1024))),
-                        ok_text = _("📖 Open PDF"),
-                        cancel_text = _("Stay Here"),
-                        ok_callback = function()
-                            self:onClose()
-                            local ReaderUI = require("apps/reader/readerui")
-                            ReaderUI:showReader(outcome.path)
-                        end,
-                    })
-                elseif outcome.kind == KIND.ABORTED then
-                    UIManager:show(Notification:new{
-                        text = _("Download canceled."),
-                        timeout = 2,
-                    })
-                else
-                    UIManager:show(ConfirmBox:new{
-                        text = T(_("Download Error:\n%1"), tostring(outcome.error)),
-                        ok_text = _("Retry"),
-                        cancel_text = _("Close"),
-                        ok_callback = function()
-                            self:executeDownload(url, target_dir, custom_filename)
-                        end,
-                    })
-                end
-            end
-        end
-    end
-
-    UIManager:nextTick(stepDownload)
+    UIManager:setDirty(self.progress_dialog, "ui")
 end
 
 function LanFetchDialog:onClose()
+    if self.download_session then
+        self.download_session:handleClose()
+    end
     UIManager:close(self)
 end
 

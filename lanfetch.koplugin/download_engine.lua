@@ -284,6 +284,21 @@ function DownloadEngine.getUniqueFilename(target_dir, base_name)
     end
 end
 
+--- Removes orphaned .lanfetch_*.tmp partial files left behind by crashes
+--- mid-download. Returns the number of files removed.
+function DownloadEngine.sweepOrphanTempFiles(target_dir)
+    if not lfs or not lfs.dir then return 0 end
+    local removed = 0
+    for entry in lfs.dir(target_dir) do
+        if entry:match("^%.lanfetch_%d+_%d+%.tmp$") then
+            if os.remove(target_dir .. "/" .. entry) then
+                removed = removed + 1
+            end
+        end
+    end
+    return removed
+end
+
 --- Lightweight pre-flight probe: Follows redirects to derive filename and file size
 --- before download prompt. Yieldable and cancellable per operation: abort_checker is
 --- polled before every yield, so CANCEL lands mid-connect, not just between hops.
