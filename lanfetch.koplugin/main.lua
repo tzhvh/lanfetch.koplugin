@@ -282,11 +282,11 @@ function LanFetch:onboardingStepTips()
     UIManager:show(ConfirmBox:new{
         text = _([[Keypad Shortcuts & Affordances:
 
-• [Tab Octet]: Cycle through IP segments. Typing a number replaces the whole segment!
-• [◀ / ▶]: Cancel selection and navigate characters.
-• [⌫ Del Box]: Clear the selected segment in one tap.
+• [⇥ Tab]: Cycle through IP segments. Typing a number replaces the whole segment!
+• [◀ Left / Right ▶]: Cancel selection and navigate characters.
+• [⌫ Del]: Clear the selected segment in one tap.
 • [ABC / URL]: Open full virtual keyboard for domain names & filenames.
-• [⚡ Detect Subnet]: Auto-fills your active LAN network address.]]),
+• [Detect Subnet]: Auto-fills your active LAN network address.]]),
         ok_text = _("Launch Downloader"),
         cancel_text = _("Close"),
         ok_callback = function()

@@ -137,7 +137,7 @@ function FolderManager:getPresetTagItems()
         name = "Base Root",
         subfolder = "",
         is_active = (self.active_subfolder == ""),
-        display_text = "📁 [Root]"
+        display_text = "[Root]"
     })
 
     for _, p in ipairs(self.presets) do

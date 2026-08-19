@@ -47,6 +47,30 @@ local OPENABLE_EXTENSIONS = {
     jpg = true, jpeg = true, png = true, gif = true, bmp = true, webp = true, svg = true,
 }
 
+-- The keypad's commit key: paint as a normal button, then flip the cell's
+-- rectangle so DOWNLOAD reads white-on-black. Stock Button cannot color its
+-- text, so the inversion happens at blit time (issue 08).
+local InvertedButton = Button:extend{
+    lf_inverted = true,
+}
+
+function InvertedButton:paintTo(bb, x, y)
+    Button.paintTo(self, bb, x, y)
+    local d = self.dimen or (self[1] and self[1].dimen)
+    if d and d.w and d.h and bb.invertRect then
+        bb:invertRect(d.x, d.y, d.w, d.h)
+    end
+end
+
+-- The URL mirror is a single-line button, so long URLs are middle-ellipsis
+-- trimmed to a character budget rather than measured widths (issue 08).
+local function fitForURLBar(url, budget)
+    if #url <= budget then return url end
+    local head_len = math.floor(budget * 0.6)
+    local tail_len = budget - head_len - 1
+    return url:sub(1, head_len) .. "…" .. url:sub(#url - tail_len + 1)
+end
+
 local LanFetchDialog = InputContainer:extend{
     name = "lanfetch_dialog",
 }
@@ -76,7 +100,7 @@ function LanFetchDialog:detectSubnet(manual_tap)
         return
     end
 
-    -- Manual tap on "⚡ Detect Subnet": Discover all active candidate IPs and cycle
+    -- Manual tap on "Detect Subnet": Discover all active candidate IPs and cycle
     local all_ips = SubnetProbe.detectAllActiveIPs()
     if #all_ips == 0 then
         UIManager:show(Notification:new{
@@ -92,7 +116,7 @@ function LanFetchDialog:detectSubnet(manual_tap)
         self.tabber:setSubnetPrefill(prefill, focus)
         self:refreshUI()
         UIManager:show(Notification:new{
-            text = T(_("⚡ Detected Subnet: %1"), ip),
+            text = T(_("Detected subnet: %1"), ip),
             timeout = 2,
         })
     else
@@ -102,7 +126,7 @@ function LanFetchDialog:detectSubnet(manual_tap)
         self.tabber:setSubnetPrefill(prefill, focus)
         self:refreshUI()
         UIManager:show(Notification:new{
-            text = T(_("⚡ Subnet (%1/%2): %3 (tap to cycle)"), self.detected_ip_index, #all_ips, ip),
+            text = T(_("Subnet (%1/%2): %3 (tap to cycle)"), self.detected_ip_index, #all_ips, ip),
             timeout = 3,
         })
     end
@@ -118,20 +142,22 @@ function LanFetchDialog:buildLayout()
     local margin_w = math.floor(screen_w * 0.03)
     local content_w = screen_w - (margin_w * 2)
 
-    -- 1. TOP ACTION BAR
+    -- 1. TOP ACTION STRIP (issue 08: every button explicitly thin-bordered)
     local top_action_bar = HorizontalGroup:new{
         align = "center",
         Button:new{
-            text = T(_("📁 Save: %1"), self.folder_manager:getTargetPath():match("([^/]+)$") or "Downloads"),
+            text = T(_("Save: %1"), self.folder_manager:getTargetPath():match("([^/]+)$") or "Downloads"),
             face = label_face,
+            bordersize = 1,
             padding = 6,
             margin = 2,
             background = Blitbuffer.COLOR_WHITE,
             callback = function() self:showFolderActionMenu() end,
         },
         Button:new{
-            text = _("⚡ Detect Subnet"),
+            text = _("Detect Subnet"),
             face = label_face,
+            bordersize = 1,
             padding = 6,
             margin = 2,
             background = Blitbuffer.COLOR_WHITE,
@@ -143,6 +169,7 @@ function LanFetchDialog:buildLayout()
         Button:new{
             text = _("✕ Close"),
             face = label_face,
+            bordersize = 1,
             padding = 6,
             margin = 2,
             background = Blitbuffer.COLOR_WHITE,
@@ -150,7 +177,7 @@ function LanFetchDialog:buildLayout()
         },
     }
 
-    -- 2. SCROLLABLE TAG PRESET RIBBON
+    -- 2. TAG PRESET RIBBON (Tag Ribbon Paging)
     local tag_items = self.folder_manager:getPresetTagItems()
     local total_tags = #tag_items
     local max_visible_tags = math.max(3, math.floor(screen_w / 140))
@@ -228,6 +255,7 @@ function LanFetchDialog:buildLayout()
     table.insert(tag_buttons, Button:new{
         text = _("+ New"),
         face = label_face,
+        bordersize = 1,
         margin = 2,
         padding = 4,
         background = Blitbuffer.COLOR_WHITE,
@@ -239,12 +267,13 @@ function LanFetchDialog:buildLayout()
         table.unpack(tag_buttons)
     }
 
-    -- 3. SEGMENT BOX BUILDER
+    -- 3. OCTET SEGMENT BUILDER (issue 08: fixed explicit width — Button has no
+    -- min_width field, and the empty-value space padding is gone with it)
     local function makeSegmentBox(key, min_w)
         local is_active = (self.tabber:getActiveKey() == key)
         local is_selected = is_active and self.tabber.is_selected
         local val = self.tabber.segments[key]
-        local display = (val ~= "") and val or "   "
+        local display = val
 
         if is_selected then
             display = "[" .. display .. "]"
@@ -257,7 +286,7 @@ function LanFetchDialog:buildLayout()
             bordersize = is_active and 3 or 1,
             padding = 6,
             margin = 2,
-            min_width = min_w or 52,
+            width = min_w or 52,
             background = Blitbuffer.COLOR_WHITE,
             callback = function()
                 self.tabber:selectSegment(key)
@@ -282,10 +311,13 @@ function LanFetchDialog:buildLayout()
     }
 
     local full_url = self.tabber:getURL()
+    -- Character budget scaled to screen width (~8 px per char at the label
+    -- face) rather than pixel measurement, so truncation is deterministic.
+    local url_budget = math.floor((content_w - 80) / 8)
     local url_row = HorizontalGroup:new{
         align = "center",
         Button:new{
-            text = T(_("🔗 %1  ✏️"), full_url),
+            text = T(_("URL: %1 · Edit"), fitForURLBar(full_url, url_budget)),
             face = label_face,
             bordersize = 1,
             padding = 6,
@@ -297,45 +329,50 @@ function LanFetchDialog:buildLayout()
         }
     }
 
-    -- 4. NAVIGATION BAR
+    -- 4. MICRO-NAV STRIP (issue 08: five bordered keys — cash-register soft keys;
+    -- adjacent borders read as the dividers between segments)
     local nav_bar = HorizontalGroup:new{
         align = "center",
-        Button:new{ text = _("⇥ Tab Octet"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:tab(); self:refreshUI() end },
-        Button:new{ text = _("◀ Left"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:arrowLeft(); self:refreshUI() end },
-        Button:new{ text = _("Right ▶"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:arrowRight(); self:refreshUI() end },
-        Button:new{ text = _("⌫ Del Box"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:backspace(); self:refreshUI() end },
-        Button:new{ text = _("✕ Reset"), face = label_face, padding = 6, margin = 2, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:clear(); self:refreshUI() end },
+        Button:new{ text = _("⇥ Tab"), face = label_face, bordersize = 1, margin = 0, padding = 6, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:tab(); self:refreshUI() end },
+        Button:new{ text = _("◀ Left"), face = label_face, bordersize = 1, margin = 0, padding = 6, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:arrowLeft(); self:refreshUI() end },
+        Button:new{ text = _("Right ▶"), face = label_face, bordersize = 1, margin = 0, padding = 6, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:arrowRight(); self:refreshUI() end },
+        Button:new{ text = _("⌫ Del"), face = label_face, bordersize = 1, margin = 0, padding = 6, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:backspace(); self:refreshUI() end },
+        Button:new{ text = _("✕ Reset"), face = label_face, bordersize = 1, margin = 0, padding = 6, background = Blitbuffer.COLOR_WHITE, callback = function() self.tabber:clear(); self:refreshUI() end },
     }
 
-    -- 5. CUSTOM 4x4 KEYPAD
-    local keypad = ButtonTable:new{
-        width = content_w,
-        buttons = {
-            {
-                { text = "1", face = octet_face, callback = function() self.tabber:inputDigit("1"); self:refreshUI() end },
-                { text = "2", face = octet_face, callback = function() self.tabber:inputDigit("2"); self:refreshUI() end },
-                { text = "3", face = octet_face, callback = function() self.tabber:inputDigit("3"); self:refreshUI() end },
-                { text = ":", face = octet_face, callback = function() self.tabber:inputChar(":"); self:refreshUI() end },
-            },
-            {
-                { text = "4", face = octet_face, callback = function() self.tabber:inputDigit("4"); self:refreshUI() end },
-                { text = "5", face = octet_face, callback = function() self.tabber:inputDigit("5"); self:refreshUI() end },
-                { text = "6", face = octet_face, callback = function() self.tabber:inputDigit("6"); self:refreshUI() end },
-                { text = ".", face = octet_face, callback = function() self.tabber:inputChar("."); self:refreshUI() end },
-            },
-            {
-                { text = "7", face = octet_face, callback = function() self.tabber:inputDigit("7"); self:refreshUI() end },
-                { text = "8", face = octet_face, callback = function() self.tabber:inputDigit("8"); self:refreshUI() end },
-                { text = "9", face = octet_face, callback = function() self.tabber:inputDigit("9"); self:refreshUI() end },
-                { text = "/", face = octet_face, callback = function() self.tabber:inputChar("/"); self:refreshUI() end },
-            },
-            {
-                { text = _("ABC / URL"), face = btn_face, callback = function() self:switchToAlphanumericMode() end },
-                { text = "0", face = octet_face, callback = function() self.tabber:inputDigit("0"); self:refreshUI() end },
-                { text = "⌫", face = octet_face, callback = function() self.tabber:backspace(); self:refreshUI() end },
-                { text = _("⬇ DOWNLOAD"), face = btn_face, bold = true, callback = function() self:promptAndDownload() end },
-            },
+    -- 5. CUSTOM 4x4 KEYPAD (issue 08: rebuilt from ButtonTable — which
+    -- hardcodes zero per-cell borders — into explicit bordered button rows)
+    local cell_w = math.floor(content_w / 4) - 4
+    local function key(text, face, cb)
+        return Button:new{
+            text = text, face = face, callback = cb,
+            width = cell_w, bordersize = 1, margin = 1, padding = 10,
+            background = Blitbuffer.COLOR_WHITE,
         }
+    end
+    local function digitKey(d)
+        return key(d, octet_face, function() self.tabber:inputDigit(d); self:refreshUI() end)
+    end
+    local function charKey(c)
+        return key(c, octet_face, function() self.tabber:inputChar(c); self:refreshUI() end)
+    end
+    local keypad = VerticalGroup:new{
+        align = "center",
+        HorizontalGroup:new{ align = "center", digitKey("1"), digitKey("2"), digitKey("3"), charKey(":") },
+        HorizontalGroup:new{ align = "center", digitKey("4"), digitKey("5"), digitKey("6"), charKey(".") },
+        HorizontalGroup:new{ align = "center", digitKey("7"), digitKey("8"), digitKey("9"), charKey("/") },
+        HorizontalGroup:new{
+            align = "center",
+            key(_("ABC / URL"), btn_face, function() self:switchToAlphanumericMode() end),
+            digitKey("0"),
+            key("⌫", octet_face, function() self.tabber:backspace(); self:refreshUI() end),
+            InvertedButton:new{
+                text = _("↓ DOWNLOAD"), face = btn_face,
+                text_font_bold = true, bordersize = 3, width = cell_w,
+                margin = 1, padding = 10, background = Blitbuffer.COLOR_WHITE,
+                callback = function() self:promptAndDownload() end,
+            },
+        },
     }
 
     local main_group = VerticalGroup:new{
@@ -468,8 +505,8 @@ function LanFetchDialog:showFolderActionMenu()
             self.folder_manager:getTargetPath(),
             self.folder_manager.base_dir,
             active_tag),
-        ok_text = _("📁 Change Base"),
-        cancel_text = _("📂 Open in Files"),
+        ok_text = _("Change Base"),
+        cancel_text = _("Open in Files"),
         ok_callback = function()
             self:showChangeBaseFolderDialog()
         end,
@@ -513,7 +550,7 @@ function LanFetchDialog:switchToAlphanumericMode()
                         })
                     end
                 end },
-                { text = _("⬇ Download"), callback = function()
+                { text = _("↓ Download"), callback = function()
                     local raw = dialog:getInputText()
                     UIManager:close(dialog)
                     self:startDownloadURL(raw)
@@ -609,7 +646,7 @@ function LanFetchDialog:onDownloadState(state, payload)
             self.complete_dialog = nil
         end
         self.extract_dialog = InfoMessage:new{
-            text = T(_("📦 Extracting:\n%1"), payload.filename or "archive"),
+            text = T(_("Extracting:\n%1"), payload.filename or "archive"),
             dismissable = false,
         }
         UIManager:show(self.extract_dialog)
@@ -638,7 +675,7 @@ function LanFetchDialog:onDownloadState(state, payload)
                 text = text .. "\n" .. T(_("Extracted %1 file(s) to:\n%2"),
                     meta.extracted.files or 0, meta.extracted.dir or payload.path)
             else
-                text = text .. "\n" .. T(_("⚠ Extraction failed: %1\n(archive kept)"),
+                text = text .. "\n" .. T(_("Extraction failed: %1\n(archive kept)"),
                     meta.extracted.error or _("unknown error"))
             end
         end
@@ -664,14 +701,14 @@ function LanFetchDialog:onDownloadState(state, payload)
                 title_align = "center",
                 buttons = {
                     {{
-                        text = _("📦 Unzip"),
+                        text = _("Unzip"),
                         callback = function()
                             UIManager:close(dialog)
                             self.download_session:extract()
                         end,
                     }},
                     {{
-                        text = _("📂 Open Folder"),
+                        text = _("Open Folder"),
                         callback = function()
                             UIManager:close(dialog)
                             self:onClose()
@@ -695,7 +732,7 @@ function LanFetchDialog:onDownloadState(state, payload)
             local dialog
             dialog = ConfirmBox:new{
                 text = text,
-                ok_text = open_in_reader and _("📖 Open") or _("📂 Open Folder"),
+                ok_text = open_in_reader and _("Open") or _("Open Folder"),
                 cancel_text = _("Stay Here"),
                 ok_callback = function()
                     self:onClose()

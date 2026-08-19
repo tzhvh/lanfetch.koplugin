@@ -39,7 +39,7 @@ assert_eq(fm.active_subfolder, "Inbox", "Removing active preset should fallback 
 -- Test 7: UI Tag Items Generation
 local tags = fm:getPresetTagItems()
 assert_eq(#tags, 4, "Should have 1 root tag + 3 presets")
-assert_eq(tags[1].display_text, "📁 [Root]", "First item is root")
+assert_eq(tags[1].display_text, "[Root]", "First item is root (glyph-safe label, issue 08)")
 assert_eq(tags[2].is_active, true, "Inbox should be active")
 
 -- Test 8: Path Traversal Prevention

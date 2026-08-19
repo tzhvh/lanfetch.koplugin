@@ -44,17 +44,17 @@ Restart KOReader (or reload plugins) after copying.
 
 ### Downloading a file
 
-1. Tap **⚡ Detect Subnet** (or wait for auto-detection) to fill the local network prefix, e.g. `192.168.3.`.
+1. Tap **Detect Subnet** (or wait for auto-detection) to fill the local network prefix, e.g. `192.168.3.`.
 2. Enter the remaining host octet, e.g. `22`.
-3. Tap **⇥ Tab Octet** to move to the **Port** field and enter the port, e.g. `9999`.
-4. Tap **⬇ DOWNLOAD**.
+3. Tap **⇥ Tab** to move to the **Port** field and enter the port, e.g. `9999`.
+4. Tap **↓ DOWNLOAD**.
 5. The plugin checks the server and shows a confirmation with the actual file name and size.
 6. Confirm the save location and tap **Download**.
-7. When finished, tap **📖 Open PDF** to read it immediately.
+7. When finished, tap **Open** to read it immediately.
 
 ### Choosing where to save
 
-- Tap the **📁 Save: …** button to browse and select any folder on the device.
+- Tap the **Save: …** button to browse and select any folder on the device.
 - Tap a preset tag (`Inbox`, `Articles`, etc.) to quickly switch to a subfolder.
 - Use **◀** / **▶** to scroll through presets, or **+ New** to create a new subfolder preset.
 
@@ -75,7 +75,9 @@ lua tests/test_folder_manager.lua
 lua tests/test_download_engine.lua
 lua tests/test_download_session.lua
 lua tests/test_http_hop.lua
+lua tests/test_archive_extractor.lua
 lua tests/test_plugin_lifecycle.lua
+lua tests/test_ui_dialog_layout.lua
 ```
 
 Syntax check all Lua files:
